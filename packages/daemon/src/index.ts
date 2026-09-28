@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -408,9 +409,10 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
+// pathToFileURL, not a hand-built `file://` string: it also matches on Windows.
 const isDirectRun =
   process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`;
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isDirectRun) {
   startServer();

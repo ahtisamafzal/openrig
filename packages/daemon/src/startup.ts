@@ -136,6 +136,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
+import { fileURLToPath } from "node:url";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
 // can record diagnostic rows. SC-29 #10 declared verbatim in commit body.
@@ -909,7 +910,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       sessionRegistry,
       eventBus,
       bootstrapOrchestrator,
-      specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
+      specsDir: nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), "..", "specs"),
       // V0.3.1 slice 05 — kernel members run against the operator's
       // workspace, not the daemon installation tree. Without this
       // cwdOverride, BootstrapOrchestrator refuses with
@@ -1773,7 +1774,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // the same daemon endpoint.
     deps.skillLibraryDiscoveryService = new SkillLibraryDiscoveryService({
       sharedSkillsDir: nodePath.resolve(
-        nodePath.dirname(new URL(import.meta.url).pathname),
+        nodePath.dirname(fileURLToPath(import.meta.url)),
         "..",
         "specs",
         "agents",

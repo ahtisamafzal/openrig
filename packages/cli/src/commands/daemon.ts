@@ -43,6 +43,8 @@ export function realDeps(): LifecycleDeps {
       }
     },
     readProcessState: (pid) => {
+      // Windows has no zombie state (and no `ps -o`); signalCheck already proved the process exists.
+      if (process.platform === "win32") return "R";
       try {
         return execFileSync("ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf-8" });
       } catch {

@@ -22,6 +22,7 @@
 // refresh path; v0 does not surface that path, since the typical case
 // (cold daemon, no override) is handled by the loader on first start.
 
+import { fileURLToPath } from "node:url";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -154,7 +155,7 @@ export function loadStarterWorkflowSpecs(opts: StarterSpecLoaderOpts): StarterSp
  * root.
  */
 export function defaultBuiltinSpecsDir(): string {
-  const here = path.dirname(new URL(import.meta.url).pathname);
+  const here = path.dirname(fileURLToPath(import.meta.url));
   // here = .../{src|dist}/domain/workflow
   // package src/dist root = .../{src|dist}
   return path.resolve(here, "..", "..", "builtins", "workflow-specs");

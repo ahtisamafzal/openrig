@@ -26,7 +26,10 @@ import {
 const execFileAsync = promisify(execFile);
 
 const WORKSPACE_PREFIX = "openrig:";
-const PANE_ID = /^w\d+:p\d+$/;
+// herdr ids continue past 9 with letters: w9:p1, wA:p1, ...
+const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
+const PASTE_SETTLE_MS = 600;
+const SUBMIT_CHECK_MS = 2500;
 
 export type HerdrExecFn = (args: string[]) => Promise<string>;
 
@@ -62,10 +65,14 @@ class HerdrError extends Error {
   }
 }
 
+// Inherited session markers: HERDR_* (nested herdr is refused) and the
+// calling agent's own session identity, which seats must not inherit.
+const INHERITED_MARKERS = /^(HERDR_|CLAUDECODE$|CLAUDE_CODE_|CLAUDE_PID$|CLAUDE_EFFORT$|CLAUDE_PLUGIN_|CODEX_COMPANION_)/;
+
 function strippedEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (key.startsWith("HERDR_")) delete env[key];
+    if (INHERITED_MARKERS.test(key)) delete env[key];
   }
   return env;
 }
@@ -120,6 +127,21 @@ export function toHerdrKey(key: string): { key: string } | { text: string } | nu
   return { text: key };
 }
 
+/**
+ * Harness launches arrive as `env PATH='<daemon PATH>' <cmd>`. On Windows that
+ * PATH is `C:\a;D:\b`, which Git Bash cannot search; rewrite it to `/c/a:/d/b`.
+ */
+export function toPosixPathPrefix(command: string): string {
+  return command.replace(/^env PATH='([^']*;[^']*)' /, (_m, winPath: string) => {
+    const posix = winPath
+      .split(";")
+      .filter(Boolean)
+      .map((p) => p.replace(/^([A-Za-z]):[\\/]?/, (_d, drive: string) => `/${drive.toLowerCase()}/`).replace(/\\/g, "/"))
+      .join(":");
+    return `env PATH='${posix}' `;
+  });
+}
+
 export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly session: string;
   private readonly paneShell: string;
@@ -132,6 +154,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly serverOptions = new Map<string, string>();
   private readonly sessionEnvKeys = new Map<string, Set<string>>();
   private readonly activity = new Map<string, { revision: number; at: number }>();
+  private readonly lastPasteAt = new Map<string, number>();
 
   constructor(opts: HerdrSeatAdapterOptions = {}) {
     super(async (cmd) => {
@@ -269,6 +292,9 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   }
 
   override async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    // tmux auto-starts its server on new-session; herdr needs its window opened.
+    const up = await this.startServer();
+    if (!up.ok) return up;
     try {
       if (await this.resolve(name)) return { ok: false, code: "duplicate_session", message: `duplicate session: ${name}` };
       const rig = name.includes("@") ? name.slice(name.lastIndexOf("@") + 1) : "openrig";
@@ -321,6 +347,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       // herdr types a newline as Enter. Bracketed paste (what tmux `-p` does)
       // keeps multi-line text in the input until the caller's explicit submit.
       const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
+      this.lastPasteAt.set(id, Date.now());
       // Windows caps a command line near 32K chars; send long text in slices.
       for (let i = 0; i < payload.length; i += 8000) {
         await this.text(["pane", "send-text", id, payload.slice(i, i + 8000)]);
@@ -338,7 +365,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
    * tree, which getPaneCommand/getPanePid lineage depend on.
    */
   override async sendShellCommand(target: string, command: string): Promise<TmuxResult> {
-    const text = await this.sendText(target, command);
+    const text = await this.sendText(target, toPosixPathPrefix(command));
     if (!text.ok) return text;
     const enter = await this.sendKeys(target, ["Enter"]);
     if (!enter.ok) await this.sendKeys(target, ["C-c"]);
@@ -351,12 +378,31 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       for (const k of keys) {
         const mapped = toHerdrKey(k);
         if (!mapped) continue;
+        // Agent TUIs (Codex) treat an Enter that lands mid-paste as part of the
+        // paste; let the paste settle first, as the tmux send path does.
+        if ("key" in mapped && mapped.key === "enter") {
+          const wait = PASTE_SETTLE_MS - (Date.now() - (this.lastPasteAt.get(id) ?? 0));
+          if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        }
         if ("key" in mapped) await this.text(["pane", "send-keys", id, mapped.key]);
         else await this.text(["pane", "send-text", id, mapped.text]);
+        if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) await this.confirmSubmitted(id);
       }
       return { ok: true };
     } catch (err) {
       return this.fail(err);
+    }
+  }
+
+  /**
+   * Codex drops an Enter that arrives while it is still busy (startup hooks),
+   * leaving its paste placeholder in the input. Re-send Enter once if so.
+   */
+  private async confirmSubmitted(id: string): Promise<void> {
+    await new Promise((r) => setTimeout(r, SUBMIT_CHECK_MS));
+    const screen = await this.text(["pane", "read", id, "--source", "visible"]).catch(() => "");
+    if (/^\s*›\s*\[Pasted Content \d+ chars\]\s*$/m.test(screen)) {
+      await this.text(["pane", "send-keys", id, "enter"]);
     }
   }
 

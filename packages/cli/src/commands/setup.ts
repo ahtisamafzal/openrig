@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
@@ -677,7 +678,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
 
 function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
   const platform = setupDeps.platform ?? process.platform;
-  const baseDir = path.dirname(path.dirname(new URL(import.meta.url).pathname));
+  const baseDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   return {
     exists: setupDeps.exists,
     baseDir,

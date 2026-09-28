@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { HerdrSeatAdapter, toHerdrKey } from "../src/adapters/herdr-seat-adapter.js";
+import { HerdrSeatAdapter, toHerdrKey, toPosixPathPrefix } from "../src/adapters/herdr-seat-adapter.js";
 
 const ok = (result: unknown) => JSON.stringify({ id: "cli", result });
 const err = (code: string) => JSON.stringify({ id: "cli", error: { code, message: code } });
@@ -20,7 +20,10 @@ function fakeHerdr(opts: { serverDown?: boolean } = {}) {
         { pane_id: "w2:p1", workspace_id: "w2", label: "dev-impl@r", revision: 1 },
       ] });
     }
-    if (a === "pane" && b === "get") return args[2] === "w2:p1" ? ok({ pane: { pane_id: "w2:p1", workspace_id: "w2" } }) : err("pane_not_found");
+    if (a === "pane" && b === "get") {
+      if (args[2] === "w2:p1" || args[2] === "wA:p1") return ok({ pane: { pane_id: args[2], workspace_id: "w2" } });
+      return err("pane_not_found");
+    }
     return ok({ type: "ok" });
   };
   return { calls, exec };
@@ -38,6 +41,15 @@ describe("toHerdrKey", () => {
   });
 });
 
+describe("toPosixPathPrefix", () => {
+  it("rewrites a Windows PATH prefix for Git Bash and leaves other commands alone", () => {
+    expect(toPosixPathPrefix("env PATH='C:\\Program Files\\nodejs;C:\\Users\\a\\AppData\\Roaming\\npm' codex --no-daemon"))
+      .toBe("env PATH='/c/Program Files/nodejs:/c/Users/a/AppData/Roaming/npm' codex --no-daemon");
+    expect(toPosixPathPrefix("env PATH='/usr/bin:/bin' codex")).toBe("env PATH='/usr/bin:/bin' codex");
+    expect(toPosixPathPrefix("claude --session-id x")).toBe("claude --session-id x");
+  });
+});
+
 describe("HerdrSeatAdapter", () => {
   it("resolves seats only inside openrig:* workspaces", async () => {
     const h = fakeHerdr();
@@ -46,6 +58,11 @@ describe("HerdrSeatAdapter", () => {
     expect(await t.probeSession("dev-check@r")).toEqual({ state: "absent" });
     expect((await t.listPanes("dev-impl@r"))[0]?.id).toBe("w2:p1");
     expect((await t.listSessions()).map((s) => s.name)).toEqual(["dev-impl@r"]);
+  });
+
+  it("accepts herdr pane ids past w9 (letters)", async () => {
+    const t = new HerdrSeatAdapter({ exec: fakeHerdr().exec });
+    expect(await t.probeSession("wA:p1")).toEqual({ state: "present" });
   });
 
   it("reports an unreachable server as transport_unavailable, never absent", async () => {
