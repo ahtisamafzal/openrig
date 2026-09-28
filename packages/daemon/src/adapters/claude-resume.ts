@@ -1,7 +1,8 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
-import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
+import fs from "node:fs";
+import { claudePostureFlag, claudeClassicRendererEnvPrefix, claudeMcpArgs } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 
@@ -57,7 +58,7 @@ export class ClaudeResumeAdapter {
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
     const permissionMode = claudePostureFlag(process.env, resolvedPosture);
     const appliedLaunch = observeClaudePermission(permissionMode);
-    const cmd = `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg} --resume ${shellQuote(resumeToken!)}`;
+    const cmd = `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${claudeMcpArgs(process.env, _cwd, fs.existsSync)} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {

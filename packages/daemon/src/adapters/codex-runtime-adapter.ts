@@ -5,7 +5,7 @@ import os from "node:os";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
-import { codexPostureArg } from "./yolo-mode.js";
+import { codexPostureArg, codexMcpArgs } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -356,7 +356,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
     }
     const daemonOptOut = daemonSupport?.kind === "supported";
-    const daemonArg = daemonOptOut ? " --no-daemon" : "";
+    const daemonArg = (daemonOptOut ? " --no-daemon" : "") + codexMcpArgs(process.env);
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record

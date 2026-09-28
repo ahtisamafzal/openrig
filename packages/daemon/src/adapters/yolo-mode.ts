@@ -1,3 +1,5 @@
+import nodePath from "node:path";
+import { shellQuote } from "./shell-quote.js";
 // OPR.0.4.8.2 — OpenRig YOLO mode (opt-in, DEFAULT OFF).
 //
 // A simple deterministic setting that rides the STABLE launch-flag surface only (per the founder's
@@ -91,4 +93,28 @@ export function piTrust(
 export function claudeClassicRendererEnvPrefix(env: NodeJS.ProcessEnv = process.env): string {
   const v = env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN;
   return v === "0" || v === "false" ? "" : "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+}
+
+/**
+ * Opt-in (OPENRIG_SEAT_STRICT_MCP=1): launch Claude seats with only the seat's own
+ * `.mcp.json` (the agent spec's projected MCP fragments), ignoring the operator's global
+ * MCP servers. Otherwise every seat starts its own copy of every global server — on a
+ * workstation with several heavy servers that exhausts processes after a few seats.
+ * Returns a flag string with a leading space, or "" when off (command byte-identical).
+ */
+export function claudeMcpArgs(env: NodeJS.ProcessEnv, cwd: string | null | undefined, exists: (path: string) => boolean): string {
+  if (!seatStrictMcp(env)) return "";
+  const seatConfig = cwd ? nodePath.join(cwd, ".mcp.json") : null;
+  return seatConfig && exists(seatConfig) ? ` --strict-mcp-config --mcp-config ${shellQuote(seatConfig)}` : " --strict-mcp-config";
+}
+
+function seatStrictMcp(env: NodeJS.ProcessEnv): boolean {
+  const v = env.OPENRIG_SEAT_STRICT_MCP;
+  return v === "1" || v === "true";
+}
+
+/** Codex counterpart of claudeMcpArgs: turn off the operator's plugins (their MCP servers
+ *  and hooks) and the apps/computer-use tool servers for the seat. "" when off. */
+export function codexMcpArgs(env: NodeJS.ProcessEnv): string {
+  return seatStrictMcp(env) ? " --disable plugins --disable apps --disable computer_use" : "";
 }
