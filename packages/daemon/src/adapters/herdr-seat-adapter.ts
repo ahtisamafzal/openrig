@@ -59,6 +59,14 @@ interface HerdrWorkspaceInfo {
   label?: string;
 }
 
+/** Oldest herdr whose CLI/API envelopes this adapter was verified against. */
+const MIN_HERDR = [0, 9, 1];
+
+function compareVersions(a: number[], b: number[]): number {
+  for (let i = 0; i < b.length; i++) if ((a[i] ?? 0) !== b[i]) return (a[i] ?? 0) - b[i]!;
+  return 0;
+}
+
 class HerdrError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -155,6 +163,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly sessionEnvKeys = new Map<string, Set<string>>();
   private readonly activity = new Map<string, { revision: number; at: number }>();
   private readonly lastPasteAt = new Map<string, number>();
+  private preflightResult: Promise<TmuxResult> | null = null;
 
   constructor(opts: HerdrSeatAdapterOptions = {}) {
     super(async (cmd) => {
@@ -167,6 +176,33 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   }
 
   // ---- herdr plumbing -------------------------------------------------------
+
+  /** Once per adapter, before the first seat: herdr must speak the CLI/API envelopes
+   *  this adapter was built against (>= MIN_HERDR). A missing claude/codex/pi
+   *  integration only warns — seats still run, but herdr cannot report that
+   *  runtime's state or resume it natively. */
+  private async preflight(): Promise<TmuxResult> {
+    let version: string;
+    try {
+      version = (await this.herdr(["--version"])).trim();
+    } catch (err) {
+      return { ok: false, code: "tmux_unavailable", message: `herdr not runnable (${(err as Error).message}); install herdr >= ${MIN_HERDR.join(".")}` };
+    }
+    const found = /(\d+)\.(\d+)\.(\d+)/.exec(version)?.slice(1).map(Number);
+    if (!found || compareVersions(found, MIN_HERDR) < 0) {
+      return { ok: false, code: "tmux_unavailable", message: `herdr ${found?.join(".") ?? `"${version}"`} is older than ${MIN_HERDR.join(".")}; run: herdr update` };
+    }
+    try {
+      const status = await this.herdr(["integration", "status"]);
+      for (const agent of ["claude", "codex", "pi"]) {
+        const line = status.split(/\r?\n/).find((l) => l.startsWith(`${agent}:`)) ?? "";
+        if (!line.includes("current")) {
+          console.warn(`[herdr] ${agent} integration not current (${line.trim() || "missing"}); state/resume degrade. Run: herdr integration install ${agent}`);
+        }
+      }
+    } catch { /* status is advisory */ }
+    return { ok: true };
+  }
 
   private async call<T = unknown>(args: string[]): Promise<T> {
     const out = await this.herdr(args);
@@ -238,6 +274,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   // ---- server / sessions ----------------------------------------------------
 
   override async startServer(): Promise<TmuxResult> {
+    const pre = await (this.preflightResult ??= this.preflight());
+    if (!pre.ok) return pre;
     try {
       await this.workspaces();
       return { ok: true };

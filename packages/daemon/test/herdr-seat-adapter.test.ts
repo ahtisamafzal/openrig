@@ -1,14 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { HerdrSeatAdapter, toHerdrKey, toPosixPathPrefix } from "../src/adapters/herdr-seat-adapter.js";
 
 const ok = (result: unknown) => JSON.stringify({ id: "cli", result });
 const err = (code: string) => JSON.stringify({ id: "cli", error: { code, message: code } });
 
 /** Fake herdr: one seat `dev-impl@r` (w2:p1) in workspace `openrig:r`, plus a foreign pane. */
-function fakeHerdr(opts: { serverDown?: boolean } = {}) {
+function fakeHerdr(opts: { serverDown?: boolean; version?: string; integrations?: string } = {}) {
   const calls: string[][] = [];
   const exec = async (args: string[]) => {
     calls.push(args);
+    // Like real herdr, these answer without a running server.
+    if (args[0] === "--version") return `herdr ${opts.version ?? "0.9.1"}\n`;
+    if (args[0] === "integration") return opts.integrations ?? "pi: current (v9) (x)\nclaude: current (v10) (x)\ncodex: current (v8) (x)\n";
     if (opts.serverDown) return err("server_not_running");
     const [a, b] = args;
     if (a === "workspace" && b === "list") {
@@ -96,5 +99,19 @@ describe("HerdrSeatAdapter", () => {
   it("fails loudly instead of running tmux for unmapped calls", async () => {
     const t = new HerdrSeatAdapter({ exec: fakeHerdr().exec });
     expect(await t.respawnPane("w2:p1")).toMatchObject({ ok: false, code: "unsupported" });
+  });
+
+  it("refuses to start seats on a herdr older than the verified envelopes", async () => {
+    const t = new HerdrSeatAdapter({ exec: fakeHerdr({ version: "0.8.4" }).exec });
+    expect(await t.startServer()).toMatchObject({ ok: false, message: expect.stringContaining("herdr update") });
+    expect(await t.createSession("dev-new@r")).toMatchObject({ ok: false });
+  });
+
+  it("warns (but starts) when an agent integration is missing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const t = new HerdrSeatAdapter({ exec: fakeHerdr({ integrations: "claude: current (v10) (x)\ncodex: not installed (x)\n" }).exec });
+    expect(await t.startServer()).toEqual({ ok: true });
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/codex integration[\s\S]*herdr integration install codex[\s\S]*pi integration/);
+    warn.mockRestore();
   });
 });
