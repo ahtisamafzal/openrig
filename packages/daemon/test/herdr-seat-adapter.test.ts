@@ -449,7 +449,7 @@ describe("KILL is handle-bound (Windows reuses pids)", () => {
 
   it("the kill script checks the start time on the held handle before Kill()", async () => {
     const { handleBoundKillScript } = await import("../src/adapters/herdr-seat-adapter.js");
-    const script = handleBoundKillScript(4242, "2026-09-28T23:17:58.113");
+    const script = handleBoundKillScript(4242, "2026-09-28T23:17:58.113456");
     expect(script.indexOf("$p.Handle")).toBeLessThan(script.indexOf("StartTime"));
     expect(script.indexOf("exit 3")).toBeLessThan(script.indexOf("$p.Kill()"));
     expect(() => handleBoundKillScript(4242, "x'; Remove-Item C:\ -Recurse; '")).toThrow();

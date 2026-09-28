@@ -77,7 +77,7 @@ export interface ProcessRow { pid: number; ppid: number; name: string; started?:
 async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
     "-NoProfile", "-Command",
-    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.CreationDate.ToString('yyyy-MM-ddTHH:mm:ss.fff')),$($_.Name)\" }",
+    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.CreationDate.ToString('yyyy-MM-ddTHH:mm:ss.ffffff')),$($_.Name)\" }",
   ], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   return stdout.split(/\r?\n/).flatMap((line) => {
     const [pid, ppid, started, ...rest] = line.split(",");
@@ -86,8 +86,8 @@ async function cimProcessTable(): Promise<ProcessRow[]> {
   });
 }
 
-/** Creation time as both CIM and Get-Process render it, to the millisecond. */
-const STARTED_FORMAT = "yyyy-MM-ddTHH:mm:ss.fff";
+/** Creation time as both CIM (DMTF, microseconds) and Get-Process render it: full CIM precision. */
+const STARTED_FORMAT = "yyyy-MM-ddTHH:mm:ss.ffffff";
 
 /**
  * Force-kill a harness tree WITHOUT a pid-reuse window: Get-Process opens and holds a
@@ -98,7 +98,7 @@ const STARTED_FORMAT = "yyyy-MM-ddTHH:mm:ss.fff";
  * pwsh 7's Process.Kill(true) would close it if it becomes a problem.
  */
 export function handleBoundKillScript(pid: number, started: string): string {
-  if (!Number.isInteger(pid) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$/.test(started)) throw new Error("bad kill target");
+  if (!Number.isInteger(pid) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}$/.test(started)) throw new Error("bad kill target");
   return [
     "$ErrorActionPreference = 'Stop'",
     `$p = Get-Process -Id ${pid}`,
