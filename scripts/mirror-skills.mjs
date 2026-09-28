@@ -108,16 +108,72 @@ export function checkMode(exec = execFileSync) {
 }
 
 export function checkModeAbsolute(sourceDir, targetDir, exec = execFileSync) {
-  const output = exec(
-    "rsync",
-    rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }),
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "inherit"],
-    },
-  );
+  let output;
+  try {
+    output = exec(
+      "rsync",
+      rsyncAbsoluteArgs({ sourceDir, targetDir, dryRun: true }),
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "inherit"],
+      },
+    );
+  } catch (err) {
+    // No rsync (stock Windows): same dry-run answer from a Node tree compare.
+    if (err?.code !== "ENOENT") throw err;
+    output = nodeDryRunItemize(sourceDir, targetDir);
+  }
   const changes = parseChanges(output);
   return { stale: changes.length > 0, changes, output };
+}
+
+const isExcluded = (relPath, isDir) => {
+  const name = basename(relPath);
+  return EXCLUDES.some((pattern) =>
+    pattern.endsWith("/")
+      ? isDir && name === pattern.slice(0, -1)
+      : pattern.startsWith("*")
+        ? name.endsWith(pattern.slice(1))
+        : name === pattern);
+};
+
+/**
+ * What `rsync -a --delete --delete-excluded --checksum -n --itemize-changes src/ dst/` would
+ * print, for the lines parseChanges() reads: new/changed files, new dirs, deletions. Mode-bit
+ * drift (`.f...p`) is not reported: Windows has no POSIX exec bit to compare.
+ */
+export function nodeDryRunItemize(sourceDir, targetDir) {
+  const walk = (root, rel = "") => {
+    const out = new Map();
+    const dir = join(root, rel);
+    if (!existsSync(dir)) return out;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      out.set(path, entry.isDirectory() ? "d" : "f");
+      if (entry.isDirectory()) for (const [k, v] of walk(root, path)) out.set(k, v);
+    }
+    return out;
+  };
+  const excludedPath = (path, kind) => {
+    const parts = path.split("/");
+    return parts.some((_, i) => isExcluded(parts.slice(0, i + 1).join("/"), i < parts.length - 1 || kind === "d"));
+  };
+  const source = new Map([...walk(sourceDir)].filter(([path, kind]) => !excludedPath(path, kind)));
+  const target = walk(targetDir);
+  const hash = (file) => createHash("sha256").update(readFileSync(file)).digest("hex");
+  const lines = [];
+  for (const [path, kind] of source) {
+    const there = target.get(path);
+    if (kind === "d") {
+      if (there !== "d") lines.push(`cd+++++++++ ${path}/`);
+    } else if (there !== "f") {
+      lines.push(`>f+++++++++ ${path}`);
+    } else if (hash(join(sourceDir, path)) !== hash(join(targetDir, path))) {
+      lines.push(`>fc........ ${path}`);
+    }
+  }
+  for (const [path, kind] of target) if (!source.has(path)) lines.push(`*deleting ${path}${kind === "d" ? "/" : ""}`);
+  return lines.join("\n");
 }
 
 // The product_public categories the mirror's ship set CONSUMES. Exported so the refs→membership
