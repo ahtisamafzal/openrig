@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
   lstatSync,
   writeFileSync,
@@ -139,8 +140,9 @@ const isExcluded = (relPath, isDir) => {
 
 /**
  * What `rsync -a --delete --delete-excluded --checksum -n --itemize-changes src/ dst/` would
- * print, for the lines parseChanges() reads: new/changed files, new dirs, deletions. Mode-bit
- * drift (`.f...p`) is not reported: Windows has no POSIX exec bit to compare.
+ * print, for the lines parseChanges() reads: new/changed files, new dirs, deletions, and
+ * symlinks compared by link text (never followed, as rsync -a does). Mode-bit drift
+ * (`.f...p`) is not reported: Windows has no POSIX exec bit to compare.
  */
 export function nodeDryRunItemize(sourceDir, targetDir) {
   const walk = (root, rel = "") => {
@@ -149,8 +151,9 @@ export function nodeDryRunItemize(sourceDir, targetDir) {
     if (!existsSync(dir)) return out;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = rel ? `${rel}/${entry.name}` : entry.name;
-      out.set(path, entry.isDirectory() ? "d" : "f");
-      if (entry.isDirectory()) for (const [k, v] of walk(root, path)) out.set(k, v);
+      const kind = entry.isSymbolicLink() ? "L" : entry.isDirectory() ? "d" : "f";
+      out.set(path, kind);
+      if (kind === "d") for (const [k, v] of walk(root, path)) out.set(k, v);
     }
     return out;
   };
@@ -164,7 +167,11 @@ export function nodeDryRunItemize(sourceDir, targetDir) {
   const lines = [];
   for (const [path, kind] of source) {
     const there = target.get(path);
-    if (kind === "d") {
+    if (kind === "L") {
+      if (there !== "L" || readlinkSync(join(sourceDir, path)) !== readlinkSync(join(targetDir, path))) {
+        lines.push(`cL+++++++++ ${path}`);
+      }
+    } else if (kind === "d") {
       if (there !== "d") lines.push(`cd+++++++++ ${path}/`);
     } else if (there !== "f") {
       lines.push(`>f+++++++++ ${path}`);

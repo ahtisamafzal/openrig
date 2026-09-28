@@ -1224,3 +1224,32 @@ function walk(root, visit) {
     else visit(path);
   }
 }
+
+test("rsync-less fallback compares symlinks by link text, never by followed bytes", async (t) => {
+  const { nodeDryRunItemize, parseChanges } = await import("./mirror-skills.mjs");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mirror-fallback-"));
+  try {
+    const src = path.join(root, "src"), dst = path.join(root, "dst");
+    fs.mkdirSync(src); fs.mkdirSync(dst);
+    fs.writeFileSync(path.join(root, "a.txt"), "same");
+    fs.writeFileSync(path.join(root, "b.txt"), "same");
+    try {
+      fs.symlinkSync(path.join(root, "a.txt"), path.join(src, "link"));
+      fs.symlinkSync(path.join(root, "b.txt"), path.join(dst, "link"));
+    } catch {
+      t.skip("symlinks not permitted here");
+      return;
+    }
+    assert.deepEqual(parseChanges(nodeDryRunItemize(src, dst)), ["cL+++++++++ link"]);
+    fs.writeFileSync(path.join(src, "x.md"), "1"); fs.writeFileSync(path.join(dst, "x.md"), "2");
+    fs.writeFileSync(path.join(dst, "feedback.md"), "excluded -> deleted");
+    const changes = parseChanges(nodeDryRunItemize(src, dst));
+    assert.ok(changes.includes(">fc........ x.md"));
+    assert.ok(changes.includes("*deleting feedback.md"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
