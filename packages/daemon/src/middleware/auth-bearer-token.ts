@@ -231,18 +231,17 @@ export class AuthBearerTokenStartupError extends Error {
 /**
  * Startup-side check (HARD-GATE audit row 8). Throws an explicit
  * AuthBearerTokenStartupError when the bind interface is genuinely
- * public/LAN AND the bearer token is empty. Loopback or tailscale-IP
- * binds short-circuit (the tailnet is the auth boundary). Hostname
- * binds resolve via DNS first; if resolution yields a loopback or
- * tailnet IP, the same short-circuit applies. Public/LAN binds without
- * a bearer throw and the daemon refuses to start.
+ * not loopback AND the bearer token is empty. Only loopback binds
+ * short-circuit; a tailnet listener is remotely reachable, so it needs a
+ * bearer like any other (remoteCallerGate enforces the same rule per
+ * request). Hostname binds resolve via DNS first; a loopback result
+ * short-circuits. Everything else without a bearer throws.
  */
 export async function assertBindAuthInvariant(opts: {
   host: string;
   bearerToken: string | null;
 }): Promise<void> {
   if (isLoopbackBind(opts.host)) return;
-  if (isTailscaleBind(opts.host)) return;
 
   let resolvedIp: string | null = null;
   // Hostname (non-IP literal) — resolve and re-check.
@@ -250,16 +249,15 @@ export async function assertBindAuthInvariant(opts: {
     resolvedIp = await resolveToIpOrNull(opts.host);
     if (resolvedIp) {
       if (isLoopbackBind(resolvedIp)) return;
-      if (isTailscaleBind(resolvedIp)) return;
     }
   }
 
   if (opts.bearerToken && opts.bearerToken.length > 0) return;
   throw new AuthBearerTokenStartupError(
-    `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback or tailscale, ` +
+    `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback, ` +
       `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
-      `Either: (a) bind to 127.0.0.1 / localhost, (b) bind to a tailscale interface (100.64.0.0/10 IPv4 or fd7a:115c:a1e0::/48 IPv6), ` +
-      `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
+      `Either: (a) bind to 127.0.0.1 / localhost, ` +
+      `or (b) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
   );
 }
 

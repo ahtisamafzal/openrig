@@ -153,21 +153,21 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
       ).resolves.toBeUndefined();
     });
 
-    // Scenario 2: Tailscale IPv4 bind, no bearer → OK
-    it("(2) tailscale IPv4 100.95.124.51 with no bearer → OK", async () => {
+    // Scenario 2: Tailscale IPv4 bind, no bearer → REFUSED (tailnet listener is remote)
+    it("(2) tailscale IPv4 100.95.124.51 with no bearer → throws", async () => {
       await expect(
         assertBindAuthInvariant({ host: "100.95.124.51", bearerToken: null }),
-      ).resolves.toBeUndefined();
+      ).rejects.toBeInstanceOf(AuthBearerTokenStartupError);
     });
 
-    // Scenario 3: Tailscale magicDNS hostname → OK (DNS resolves to tailscale IP)
-    it("(3) magicDNS hostname that resolves to tailscale IP → OK", async () => {
+    // Scenario 3: Tailscale magicDNS hostname, no bearer → REFUSED
+    it("(3) magicDNS hostname that resolves to tailscale IP → throws", async () => {
       const dns = await import("node:dns");
       const spy = vi.spyOn(dns.promises, "lookup").mockResolvedValue({ address: "100.95.124.51", family: 4 } as unknown as never);
       try {
         await expect(
           assertBindAuthInvariant({ host: "host.tail-scale-net.ts.net", bearerToken: null }),
-        ).resolves.toBeUndefined();
+        ).rejects.toBeInstanceOf(AuthBearerTokenStartupError);
       } finally {
         spy.mockRestore();
       }
@@ -214,14 +214,14 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
       ).resolves.toBeUndefined();
     });
 
-    it("error message cites all 3 accepted paths (HG-10)", async () => {
+    it("error message cites both accepted paths (HG-10; tailnet no longer exempt)", async () => {
       try {
         await assertBindAuthInvariant({ host: "192.168.1.50", bearerToken: null });
         expect.fail("should have thrown");
       } catch (err) {
         const msg = (err as Error).message;
         expect(msg).toMatch(/loopback|127\.0\.0\.1|localhost/i);
-        expect(msg).toMatch(/tailscale|100\.64\.0\.0\/10|fd7a/i);
+        expect(msg).not.toMatch(/tailscale/i);
         expect(msg).toMatch(/OPENRIG_AUTH_BEARER_TOKEN|bearer/i);
       }
     });
