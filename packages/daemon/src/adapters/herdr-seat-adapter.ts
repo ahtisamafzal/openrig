@@ -30,6 +30,13 @@ const WORKSPACE_PREFIX = "openrig:";
 const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
 const PASTE_SETTLE_MS = 600;
 const SUBMIT_CHECK_MS = 2500;
+const SUBMIT_RETRIES = 6; // ~15s: covers Codex startup hooks + MCP boot
+
+/** A Codex paste placeholder still sitting in the composer (last lines of the screen). */
+export function pendingPaste(screen: string): boolean {
+  const tail = screen.split("\n").filter((l) => l.trim()).slice(-8).join("\n");
+  return /\[Pasted Content \d+ chars\]/.test(tail);
+}
 
 export type HerdrExecFn = (args: string[]) => Promise<string>;
 
@@ -431,7 +438,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         }
         if ("key" in mapped) await this.text(["pane", "send-keys", id, mapped.key]);
         else await this.text(["pane", "send-text", id, mapped.text]);
-        if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) await this.confirmSubmitted(id);
+        // Background: the recheck can take ~15s, far past the CLI's 5s send timeout.
+        if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) void this.confirmSubmitted(id).catch(() => {});
       }
       return { ok: true };
     } catch (err) {
@@ -440,13 +448,17 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   }
 
   /**
-   * Codex drops an Enter that arrives while it is still busy (startup hooks),
-   * leaving its paste placeholder in the input. Re-send Enter once if so.
+   * Codex drops an Enter that arrives while it is still busy (startup hooks,
+   * MCP boot), leaving the paste in its input. On Windows the paste can also
+   * arrive as typed text that Codex folds into a placeholder partway through,
+   * so look for the placeholder anywhere in the composer area (bottom of the
+   * screen), and keep re-sending Enter while Codex is still starting up.
    */
   private async confirmSubmitted(id: string): Promise<void> {
-    await new Promise((r) => setTimeout(r, SUBMIT_CHECK_MS));
-    const screen = await this.text(["pane", "read", id, "--source", "visible"]).catch(() => "");
-    if (/^\s*›\s*\[Pasted Content \d+ chars\]\s*$/m.test(screen)) {
+    for (let attempt = 0; attempt < SUBMIT_RETRIES; attempt++) {
+      await new Promise((r) => setTimeout(r, SUBMIT_CHECK_MS));
+      const screen = await this.text(["pane", "read", id, "--source", "visible"]).catch(() => "");
+      if (!pendingPaste(screen)) return;
       await this.text(["pane", "send-keys", id, "enter"]);
     }
   }

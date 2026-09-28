@@ -125,3 +125,13 @@ describe("HerdrSeatAdapter", () => {
     warn.mockRestore();
   });
 });
+
+describe("pendingPaste (Codex composer still holds a paste)", () => {
+  it("finds the placeholder in the composer, even after typed text", async () => {
+    const { pendingPaste } = await import("../src/adapters/herdr-seat-adapter.js");
+    expect(pendingPaste("history\n\n› [Pasted Content 1101 chars]\n\n  GPT-5.6 default · F:/x")).toBe(true);
+    expect(pendingPaste("# Role: QA\n  Run `rig whoami --json`, then resolve [Pasted Content 1101 chars]From: x\n  GPT-5.6")).toBe(true);
+    expect(pendingPaste("› Ask Codex to do anything\n\n  GPT-5.6 default")).toBe(false);
+    expect(pendingPaste(`[Pasted Content 5 chars]\n${"line\n".repeat(20)}`)).toBe(false);
+  });
+});
