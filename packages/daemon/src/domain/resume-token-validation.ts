@@ -70,13 +70,18 @@ function validatePiSessionFileToken(token: string): ResumeTokenValidationOk | Re
   if (token.length > MAX_PI_SESSION_FILE_LEN) {
     return { ok: false, error: `Pi session-file token is too long (max ${MAX_PI_SESSION_FILE_LEN} characters).` };
   }
-  if (!token.startsWith("/")) {
-    return { ok: false, error: "Pi session-file token must be an absolute path (starting with '/')." };
+  // Windows seat state lives under a drive path (F:\...\x.jsonl). Accept exactly a
+  // drive-letter prefix plus backslash separators; everything after the drive must
+  // still pass the POSIX charset once separators are normalized — no ':' elsewhere.
+  const windowsAbsolute = /^[A-Za-z]:\\/.test(token);
+  if (!token.startsWith("/") && !windowsAbsolute) {
+    return { ok: false, error: "Pi session-file token must be an absolute path (starting with '/', or a drive like 'C:\\')." };
   }
-  if (token.split("/").includes("..")) {
+  if (token.split(/[\\/]/).includes("..")) {
     return { ok: false, error: "Pi session-file token must not contain a '..' path segment." };
   }
-  if (!PI_SESSION_FILE_CHARSET_RE.test(token)) {
+  const pathPart = windowsAbsolute ? token.slice(2).replace(/\\/g, "/") : token;
+  if (!PI_SESSION_FILE_CHARSET_RE.test(pathPart)) {
     return {
       ok: false,
       error: "Pi session-file token contains disallowed characters (allowed: letters, digits, '.', '_', '/', '@', '-').",

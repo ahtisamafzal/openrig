@@ -267,18 +267,31 @@ export async function assertBindAuthInvariant(opts: {
 // clients from 127.0.0.1, so a loopback peer carrying any of these is remote.
 const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip"];
 
+const isLoopbackAddress = (address: string): boolean => {
+  const a = address.toLowerCase().replace(/^::ffff:/, "");
+  return a === "::1" || a.startsWith("127.");
+};
+
 /**
- * True when the HTTP caller is on this host: a loopback socket peer with no
- * proxy-forwarding headers. A request with no socket (in-process `app.request`
- * from tests or internal callers) is local by construction. An SSH tunnel
- * terminating here also looks local — only someone with host access can open one.
+ * True when the HTTP caller is on this host: it reached the LOOPBACK listener
+ * (a request on the tailnet/LAN listener is never local, even from 127.0.0.1),
+ * from a loopback peer, without proxy-forwarding headers. A request with no
+ * socket (in-process `app.request` from tests or internal callers) is local by
+ * construction.
+ *
+ * Trust model, deliberately: loopback peers on the loopback listener are the
+ * single operator's own tools (CLI, TUI, seats' `rig` calls, which carry no
+ * bearer). Nothing here can distinguish a same-host reverse proxy or SSH tunnel
+ * that forwards INTO the loopback listener without headers — as with any
+ * localhost-only service, exposing it that way is the operator's decision. Remote
+ * access belongs on the bearer-gated non-loopback listener.
  */
 export function isLoopbackRequest(c: { env?: unknown; req?: { header(name: string): string | undefined } }): boolean {
-  const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
-    ?.incoming?.socket?.remoteAddress;
-  if (address === undefined) return true;
-  const a = address.toLowerCase().replace(/^::ffff:/, "");
-  if (!(a === "::1" || a.startsWith("127."))) return false;
+  const socket = (c.env as { incoming?: { socket?: { remoteAddress?: string; localAddress?: string } } } | undefined)
+    ?.incoming?.socket;
+  if (socket?.remoteAddress === undefined) return true;
+  if (!isLoopbackAddress(socket.remoteAddress)) return false;
+  if (socket.localAddress !== undefined && !isLoopbackAddress(socket.localAddress)) return false;
   return !PROXY_HEADERS.some((h) => c.req?.header(h) !== undefined);
 }
 

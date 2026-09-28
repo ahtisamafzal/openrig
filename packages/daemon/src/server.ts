@@ -398,6 +398,12 @@ function safeResolveUiPath(uiDistDir: string, requestPath: string): string | nul
   if (resolvedPath !== uiDistDir && !resolvedPath.startsWith(normalizedRoot)) {
     return null;
   }
+  // These GETs are public: a symlink/junction inside the bundle must not lead out of it.
+  try {
+    const realRoot = fs.realpathSync(uiDistDir);
+    const realFile = fs.realpathSync(resolvedPath);
+    if (realFile !== realRoot && !realFile.startsWith(`${realRoot}${nodePath.sep}`)) return null;
+  } catch { /* missing file: the caller's existsSync check answers 404 */ }
   return resolvedPath;
 }
 

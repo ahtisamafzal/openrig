@@ -42,4 +42,10 @@ describe("remoteCallerGate", () => {
     expect((await app("s3cret").request("/", {}, from("192.168.1.5"))).status).toBe(200);
     expect((await app("s3cret").request("/api/rigs", {}, from("192.168.1.5"))).status).toBe(401);
   });
+  it("never treats the non-loopback listener as local, even from a loopback peer", async () => {
+    const onTailnet = { incoming: { socket: { remoteAddress: "127.0.0.1", localAddress: "100.101.102.103" } } };
+    expect((await app(null).request("/api/rigs", {}, onTailnet)).status).toBe(401);
+    const onLoopback = { incoming: { socket: { remoteAddress: "127.0.0.1", localAddress: "127.0.0.1" } } };
+    expect((await app(null).request("/api/rigs", {}, onLoopback)).status).toBe(200);
+  });
 });
