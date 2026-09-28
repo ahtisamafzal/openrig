@@ -13,11 +13,19 @@
 // because vendored plugins live at ~/.openrig/plugins/<id>/ by convention
 // and operators write that literal path in their agent.yaml resources.
 
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import * as os from "node:os";
 import * as nodePath from "node:path";
 import { planProjection, type ProjectionInput, type ProjectionFsOps } from "../src/domain/projection-planner.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 function emptyResources(): ResolvedResources {
   return { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] };

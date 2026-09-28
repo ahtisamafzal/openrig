@@ -1,10 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { migrate } from "../src/db/migrate.js";
 import { rigServicesSchema } from "../src/db/migrations/020_rig_services.js";
 import type { RigSpec, RigServicesRecordInput } from "../src/domain/types.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const VALID_RIG_WITH_SERVICES = {
   version: "0.2",

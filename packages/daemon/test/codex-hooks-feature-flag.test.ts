@@ -15,6 +15,14 @@ import { describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { SETTINGS_VALID_KEYS } from "../src/domain/user-settings/settings-store.js";
 
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 function mockTmux() {
   return {
     sessionExists: vi.fn().mockResolvedValue(true),

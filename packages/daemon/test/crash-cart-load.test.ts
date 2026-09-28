@@ -9,6 +9,14 @@ import {
   CrashCartReadError,
 } from "../src/domain/crash-cart-discovery.js";
 
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 // Crash-cart C2 — the compose orchestrator: fail-closed guard FIRST, then copy-then-read, read the
 // discovery view, and ALWAYS clean up the scratch copy. All IO injected → hermetic.
 

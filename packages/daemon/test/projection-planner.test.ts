@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { planProjection, type ProjectionFsOps, type ProjectionInput } from "../src/domain/projection-planner.js";
 import { hashContent } from "../src/domain/conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
@@ -316,6 +316,14 @@ import {
   claudeConflictTargetPath,
   projectionConflictWarnings,
 } from "../src/domain/projection-planner.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 describe("P17 — production conflict-target resolver (claudeConflictTargetPath)", () => {
   it("maps skill -> the projected SKILL.md, subagent -> agents/<source basename>, guidance -> CLAUDE.md", () => {

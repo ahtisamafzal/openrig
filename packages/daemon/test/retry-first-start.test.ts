@@ -3,6 +3,14 @@ import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 const root = "/fixture/first-start";
 const skillIds = ["development-team", "systematic-debugging", "test-driven-development", "verification-before-completion"];
 const member = { id: "pi", agent_ref: "local:agent", profile: "default", runtime: "pi", model: "provider/model", cwd: root };

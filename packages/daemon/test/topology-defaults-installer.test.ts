@@ -3,9 +3,17 @@
 // instance file at the TOP of the root; copy-if-absent NEVER overwrites earned
 // context; a spec without topology/ is a normal no-op; failures are named,
 // never thrown (a rig launch must not die on a defaults copy).
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { join } from "node:path";
 import { installTopologyDefaults, type TopologyDefaultsFsOps } from "../src/domain/topology-defaults-installer.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const SPEC = "/specs/product-team";
 const ROOT = "/inst/topology";

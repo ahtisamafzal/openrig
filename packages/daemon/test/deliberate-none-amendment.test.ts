@@ -6,7 +6,7 @@
 // (zero privilege delta — the change is record/provenance only).
 // P1 (HONESTY CRUX) and P2 (POSTURE-IDENTITY) are the ruled form's pin-required
 // invariants for this lane; P3 (write-on-explicit-selection-only) is Lane-B's.
-import { describe, expect, it } from "vitest";
+import { vi, describe, expect, it } from "vitest";
 import {
   resolvePermissionPolicyAttachment,
   validatePermissionPolicyRef,
@@ -14,6 +14,14 @@ import {
 import { rigPreflight } from "../src/domain/rigspec-preflight.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const AGENT_YAML = `name: impl
 version: "1.0.0"

@@ -6,6 +6,14 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { observeClaudePermission, observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { ClaudePermissionModeCache, PermissionDriftObserver } from "../src/domain/permission-drift-observer.js";
 
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 describe("PermissionDriftObserver", () => {
   it("reads only the exact current generation and runtime-native effective surface", () => {
     const db = createFullTestDb();

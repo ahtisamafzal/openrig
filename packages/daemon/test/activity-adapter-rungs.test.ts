@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import type Database from "better-sqlite3";
 import {
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
@@ -8,6 +8,14 @@ import {
 } from "../src/domain/activity-taxonomy.js";
 import { readClaudeSelfReportEvidence, type ClaudeSelfReportRead } from "../src/adapters/claude-code-adapter.js";
 import { SeatActivityService } from "../src/domain/seat-activity-service.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 // OPR.0.5.5.19 A5 — per-harness rung inventories + the Claude self-report rung (r3) +
 // the production wiring (sweep auto-declaration, self-report consultation, silent fall).

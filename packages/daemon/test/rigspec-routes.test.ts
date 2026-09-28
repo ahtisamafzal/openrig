@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 import type { RigRepository } from "../src/domain/rig-repository.js";
@@ -18,6 +18,14 @@ import { RigRepository as RigRepoClass } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { createApp } from "../src/server.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const VALID_YAML = `
 schema_version: 1

@@ -1,5 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { routeAgentImages, type AgentImagesRouterFsOps, type RouteAgentImagesInput } from "../src/domain/bundle-agent-images-router.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 // Item 6 / slice-05 Checkpoint 7.3g step 2: bundle-agent-images-router
 // pure-function tests. PRD line 197: declared paths are agent-image

@@ -15,7 +15,7 @@
 // path is preserved). Malformed settings are preserved (fail-closed). Missing
 // source produces NO dangling commands and NO false projected claim.
 
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -25,6 +25,14 @@ import { planProjection, type ProjectionPlan, type ProjectionEntry } from "../sr
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.js";
 import { resolveAgentRef, type ResolvedAgentSpec } from "../src/domain/agent-resolver.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const CWD = "/project";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";

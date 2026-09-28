@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { vi, describe, expect, it } from "vitest";
 import {
   diagnoseRuntimePosture,
   observeClaudePermission,
@@ -8,6 +8,14 @@ import {
   renderPermissionDriftSummary,
   type PermissionDriftFs,
 } from "../src/domain/permission-drift.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 function fsFixture(files: Record<string, string | Error>, cwdReadable: boolean | null = true): PermissionDriftFs {
   return {

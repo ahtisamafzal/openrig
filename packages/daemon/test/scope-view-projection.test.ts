@@ -1,7 +1,7 @@
 // SCOPES VIEW — store-direct projection pins (plan d64d2f5c proof-contract legs 1/3/5):
 // counts derive from LOCKS + C1 DROPS only; PROGRESS.md is never read; paired means
 // exactly ≥1-drop-cites-item; the lock states come from the frontmatter stamps.
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { projectSliceScope, projectMissionScopes, type ScopeFsDeps } from "../src/domain/scope/scope-view-projection.js";
 
 const README = `---
@@ -122,6 +122,14 @@ describe("scope-view projection (store-direct)", () => {
 // LOOK delta D1 — spec-sha computed from the LOCKED ARTIFACT'S BYTES at projection time
 // (the store carries the path, not a hash; computed = store-derived, never transcribed).
 import { createHash } from "node:crypto";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 describe("D1 — spec-sha from locked artifact bytes", () => {
   it("specShaShort = sha256[:8] of the locked artifact file; null when the file is absent", () => {
     const prd = "# the PRD bytes";

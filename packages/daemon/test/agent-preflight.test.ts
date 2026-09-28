@@ -1,6 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import { agentPreflight } from "../src/domain/agent-preflight.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 function mockFs(files: Record<string, string>): AgentResolverFsOps {
   return {

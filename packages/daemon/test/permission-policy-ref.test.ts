@@ -2,7 +2,7 @@
 // validate/classify (builtin vs custom vs reserved vs invalid), the flag-surface launch-posture
 // resolution (README v4 d65afe67: YOLO/Operator = full_bypass, everything else = floor), and the
 // member > rig > floor precedence. Grounds the ref/none semantics from README v4 A1/A2/A3.
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import {
   validatePermissionPolicyRef,
   classifyPermissionPolicyRef,
@@ -11,6 +11,14 @@ import {
   builtinPackageTarget,
   BUILTIN_POLICY_NAMES,
 } from "../src/domain/permission-policy/policy-ref.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 const FLAG_FULL_BYPASS = `---\nsource: custom\nname: operator-clone\nsurface: flag\nlaunch_posture: full_bypass\npolicy_schema_version: 1\ndescription: a custom operator-style flag policy\n---\nbody\n`;
 const CONFIG_POLICY = `---\nsource: custom\nname: my-config\nsurface: config\ndefault_posture: ask\nallow: []\nask: []\ndeny: []\ndestructive_class: []\npolicy_schema_version: 1\ndescription: a custom config policy\n---\nbody\n`;

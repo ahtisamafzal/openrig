@@ -13,9 +13,17 @@
 //
 // SEMANTIC FENCE: this order is PRESENTATION ONLY. Any consumer that treats the first warning as
 // higher-priority is a FINDING, not an ordering input — this pin freezes presentation, never semantics.
-import { describe, expect, it } from "vitest";
+import { vi, describe, expect, it } from "vitest";
 import { rigPreflight } from "../src/domain/rigspec-preflight.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
+
+// These tests drive the code against in-memory POSIX-keyed fixtures; run the code's
+// path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 // An agent.yaml that DECLARES + SELECTS the claude_activity_hooks runtime resource — so a claude-code
 // member triggers the managed-activity-hook delivery check (which warns when the assets are absent).

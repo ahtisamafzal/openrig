@@ -152,7 +152,8 @@ function createCodexLogsDb(homeDir: string, pid: number, threadId: string, dbNam
 }
 
 describe("Codex runtime adapter", () => {
-  it("launches the probed executable despite a different login-shell PATH", async () => {
+  // POSIX-only by construction (":"-joined PATH, #!/bin/sh shims run by /bin/sh).
+  it.skipIf(process.platform === "win32")("launches the probed executable despite a different login-shell PATH", async () => {
     const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-launch-path-"));
     try {
       const selected = nodePath.join(root, "selected tools");
