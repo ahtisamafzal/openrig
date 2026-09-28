@@ -320,8 +320,9 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
 
 // Windows has no `ps`. One CIM query yields the same rows, with CreationDate rendered
 // in `ps lstart` form ("Sun Aug 23 19:30:00 2026", local time) so pid+start-time
-// identity and lstartToMinTs work unchanged. Tab-separated; CommandLine is null for
-// protected processes, so fall back to the image name.
+// identity and lstartToMinTs work unchanged. Tab-separated. `image` is the OS-reported
+// executable (Win32_Process.Name) for callers that must not trust argv; CommandLine is
+// null for protected processes, so it falls back to the image name.
 const WINDOWS_PROCESS_QUERY = [
   // CIM errors are non-terminating by default: without Stop a failed query exits 0
   // with no rows, which the census would cache as an empty success.
@@ -331,24 +332,32 @@ const WINDOWS_PROCESS_QUERY = [
   "Get-CimInstance Win32_Process | ForEach-Object {",
   "  $start = if ($_.CreationDate) { $_.CreationDate.ToString('ddd MMM d HH:mm:ss yyyy', $ic) } else { '' };",
   "  $cmd = if ($_.CommandLine) { $_.CommandLine } else { $_.Name };",
-  "  '{0}\t{1}\t{2}\t{3}' -f $_.ProcessId, $_.ParentProcessId, $start, ($cmd -replace '[\\r\\n\\t]', ' ')",
+  "  '{0}\t{1}\t{2}\t{3}\t{4}' -f $_.ProcessId, $_.ParentProcessId, $start, $_.Name, ($cmd -replace '[\\r\\n\\t]', ' ')",
   "}",
 ].join(" ");
 
-export function parseWindowsProcessRows(stdout: string): Array<{ pid: number; ppid: number; command: string; startedAt: string }> {
+export interface WindowsProcessRow { pid: number; ppid: number; command: string; startedAt: string; image: string }
+
+export function parseWindowsProcessRows(stdout: string): WindowsProcessRow[] {
   return stdout.split(/\r?\n/).flatMap((line) => {
-    const [pid, ppid, startedAt, command] = line.split("\t");
+    const [pid, ppid, startedAt, image, command] = line.split("\t");
     if (!pid || !ppid || command === undefined || !/^\d+$/.test(pid) || !/^\d+$/.test(ppid)) return [];
-    return [{ pid: Number(pid), ppid: Number(ppid), startedAt: startedAt ?? "", command }];
+    return [{ pid: Number(pid), ppid: Number(ppid), startedAt: startedAt ?? "", image: image ?? "", command }];
   });
 }
 
 /** A live system always has processes: zero parsed rows is a failed enumeration and
  *  must reject (honest failure), never become a cached empty census. */
-export function windowsCensusRows(stdout: string): Array<{ pid: number; ppid: number; command: string; startedAt: string }> {
+export function windowsCensusRows(stdout: string): WindowsProcessRow[] {
   const rows = parseWindowsProcessRows(stdout);
   if (rows.length === 0) throw new Error("Windows process census returned no parseable rows");
   return rows;
+}
+
+export async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
+  const stdout = await runAsyncSite("resume_metadata.list_processes", async () =>
+    (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout);
+  return windowsCensusRows(stdout);
 }
 
 /** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn
@@ -358,11 +367,7 @@ export function windowsCensusRows(stdout: string): Array<{ pid: number; ppid: nu
  *  cached while 520 were live). The lenient variant keeps its contract for
  *  the direct per-call consumers that want best-effort. */
 export async function defaultListProcessesStrict(): Promise<Array<{ pid: number; ppid: number; command: string; startedAt: string }>> {
-  if (process.platform === "win32") {
-    const stdout = await runAsyncSite("resume_metadata.list_processes", async () =>
-      (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout);
-    return windowsCensusRows(stdout);
-  }
+  if (process.platform === "win32") return listWindowsProcesses();
   const output = await runAsyncSite("resume_metadata.list_processes", async () => {
     // lstart = the process START TIME — the identity half of pid+start-time
     // (r1's pid-reuse remedy): a reused pid changes lstart, so a consumer

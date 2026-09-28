@@ -5,10 +5,10 @@ import { ProcessCensus } from "../src/domain/process-census.js";
 
 describe("Windows process census", () => {
   it("parses tab-separated CIM rows and drops malformed lines", () => {
-    const out = "4\t0\t\tSystem\r\n1200\t4\tMon Sep 28 18:52:01 2026\tC:\\x\\node.exe a b\r\nbad line\r\n";
+    const out = "4\t0\t\tSystem\tSystem\r\n1200\t4\tMon Sep 28 18:52:01 2026\tnode.exe\tC:\\x\\node.exe a b\r\nbad line\r\n";
     expect(parseWindowsProcessRows(out)).toEqual([
-      { pid: 4, ppid: 0, startedAt: "", command: "System" },
-      { pid: 1200, ppid: 4, startedAt: "Mon Sep 28 18:52:01 2026", command: "C:\\x\\node.exe a b" },
+      { pid: 4, ppid: 0, startedAt: "", image: "System", command: "System" },
+      { pid: 1200, ppid: 4, startedAt: "Mon Sep 28 18:52:01 2026", image: "node.exe", command: "C:\\x\\node.exe a b" },
     ]);
   });
 
@@ -26,8 +26,8 @@ describe("Windows process census", () => {
     expect(() => windowsCensusRows("")).toThrow();
     expect(() => windowsCensusRows("garbage only")).toThrow();
     let calls = 0;
-    const census = new ProcessCensus({ list: async () => { calls++; return windowsCensusRows(calls === 1 ? "" : "4\t0\t\tSystem"); } });
+    const census = new ProcessCensus({ list: async () => { calls++; return windowsCensusRows(calls === 1 ? "" : "4\t0\t\tSystem\tSystem"); } });
     await expect(census.list()).rejects.toThrow();
-    expect(await census.list()).toEqual([{ pid: 4, ppid: 0, startedAt: "", command: "System" }]);
+    expect(await census.list()).toEqual([{ pid: 4, ppid: 0, startedAt: "", image: "System", command: "System" }]);
   });
 });

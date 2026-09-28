@@ -107,6 +107,16 @@ describe("HerdrSeatAdapter", () => {
     expect(await t.createSession("dev-new@r")).toMatchObject({ ok: false });
   });
 
+  it("retries a failed preflight, so upgrading herdr needs no daemon restart", async () => {
+    let version = "0.8.4";
+    const fake = fakeHerdr();
+    const exec = async (args: string[]) => (args[0] === "--version" ? `herdr ${version}` : fake.exec(args));
+    const t = new HerdrSeatAdapter({ exec });
+    expect((await t.startServer()).ok).toBe(false);
+    version = "0.9.1";
+    expect(await t.startServer()).toEqual({ ok: true });
+  });
+
   it("warns (but starts) when an agent integration is missing", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const t = new HerdrSeatAdapter({ exec: fakeHerdr({ integrations: "claude: current (v10) (x)\ncodex: not installed (x)\n" }).exec });

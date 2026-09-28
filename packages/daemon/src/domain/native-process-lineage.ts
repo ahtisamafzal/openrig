@@ -21,7 +21,7 @@ function tokens(command: string): string[] {
 }
 
 function executableName(token: string): string {
-  return (token.split("/").pop() ?? token).toLowerCase().replace(/\.exe$/, "");
+  return (token.split(/[\\/]/).pop() ?? token).toLowerCase().replace(/\.exe$/, "");
 }
 
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {
@@ -103,13 +103,10 @@ export function findExactNativeResumeProcess(
 export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
   try {
     if (process.platform === "win32") {
-      // No `ps`, and no process groups: pgid/tpgid are 0, so the foreground-group proof in
-      // selectCodexProcess stays honestly unproven, while pid/ppid/command/startedAt (for
-      // descendant and thread-id discovery) come from the shared CIM enumeration.
-      const { defaultListProcessesStrict } = await import("./resume-metadata-refresher.js");
-      return (await defaultListProcessesStrict()).map((row) => ({
-        ...row, pgid: 0, tpgid: 0, executableName: executableName(tokens(row.command)[0] ?? ""),
-      }));
+      // No `ps` and no process groups: rows come from the shared CIM enumeration, with the
+      // OS-reported image name (not argv) as executableName; pgid/tpgid stay undefined.
+      const { listWindowsProcesses } = await import("./resume-metadata-refresher.js");
+      return (await listWindowsProcesses()).map(({ image, ...row }) => ({ ...row, executableName: executableName(image) }));
     }
     const output = await runAsyncSite("codex.runtime.list_processes", async () => {
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
@@ -128,11 +125,16 @@ export type CodexProcessObservation = { panePid: number; process: NativeProcessR
 function selectCodexProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false): CodexProcessObservation | null {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
-  if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return null;
+  if (byPid.size !== rows.length || !root?.startedAt) return null;
+  // Windows has no process groups, so the foreground-group condition cannot apply; the
+  // rest of the proof (OS image name + argv name codex, unique native candidate, intact
+  // start-timed ancestry to the pane, exact resume token) is unchanged.
+  const groupless = globalThis.process.platform === "win32" && root.pgid === undefined && root.tpgid === undefined;
+  if (!groupless && (!root.tpgid || root.tpgid <= 0)) return null;
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
   for (const row of rows) {
     if (row.executableName !== "codex" || executableName(tokens(row.command)[0] ?? "") !== "codex"
-      || row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
+      || (!groupless && (row.pgid !== root.tpgid || row.tpgid !== root.tpgid))) continue;
     const chain: NativeProcessRow[] = [];
     const visited = new Set<number>();
     let current: NativeProcessRow | undefined = row;

@@ -276,8 +276,13 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   // ---- server / sessions ----------------------------------------------------
 
   override async startServer(): Promise<TmuxResult> {
+    // Share an in-flight or passed preflight; a failure is retried next call, so
+    // installing or upgrading herdr needs no daemon restart.
     const pre = await (this.preflightResult ??= this.preflight());
-    if (!pre.ok) return pre;
+    if (!pre.ok) {
+      this.preflightResult = null;
+      return pre;
+    }
     try {
       await this.workspaces();
       return { ok: true };
