@@ -474,3 +474,24 @@ describe("an unverified MSYS link under the seat shell", () => {
     expect(await t.respawnPane("dev-impl@r", "codex")).toMatchObject({ ok: false, code: "pane_busy" });
   });
 });
+
+describe("an unverified link that would MOVE the seat shell", () => {
+  it("still reads ambiguous (never no_shell/free)", async () => {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) =>
+      args[0] === "pane" && args[1] === "process-info"
+        ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+        : h.exec(args);
+    const processTable = async () => [
+      { pid: 100, ppid: 1, name: "powershell.exe" },
+      { pid: 999, ppid: 1, name: "bash.exe" },
+      // the seat shell's Windows parent is the pane root, but an unverified MSYS link moved it
+      { pid: 200, ppid: 999, name: "bash.exe", unverified: true, originalPpid: 100 },
+      { pid: 300, ppid: 200, name: "claude.exe" },
+    ];
+    const t = new HerdrSeatAdapter({ exec, processTable });
+    expect(await t.isPaneDead("dev-impl@r")).toBe(false);
+    expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+    expect(await t.respawnPane("dev-impl@r", "codex")).toMatchObject({ ok: false, code: "pane_busy" });
+  });
+});

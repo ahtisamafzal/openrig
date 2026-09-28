@@ -72,7 +72,7 @@ export interface HerdrSeatAdapterOptions {
 }
 
 /** `started` (Windows creation time) pins a pid's identity: Windows reuses pids. */
-export interface ProcessRow { pid: number; ppid: number; name: string; started?: string; unverified?: boolean }
+export interface ProcessRow { pid: number; ppid: number; name: string; started?: string; unverified?: boolean; originalPpid?: number }
 
 async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
@@ -697,7 +697,11 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     const ignore = /^(conhost|OpenConsole)\.exe$/i;
     const shellBase = nodePath.win32.basename(this.paneShell).toLowerCase();
     const isShell = (p: ProcessRow) => p.name.toLowerCase() === shellBase;
-    const kids = (pid: number) => rows.filter((r) => r.ppid === pid && !ignore.test(r.name));
+    // An unverified MSYS link counts under BOTH its MSYS and its original Windows parent, and
+    // any unverified row met on the way down makes the pane ambiguous: an unproven rewrite must
+    // never hide a live shell or harness (which would read as a free pane).
+    const kids = (pid: number) => rows.filter((r) => (r.ppid === pid || r.originalPpid === pid) && !ignore.test(r.name));
+    if (kids(root).some((r) => r.unverified)) return "ambiguous";
     const shells = kids(root).filter(isShell);
     if (shells.length === 0) return "no_shell";
     if (shells.length > 1) return "ambiguous";
@@ -707,7 +711,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       if (under.length === 0) return null;
       if (under.length > 1) return "ambiguous";
       // Something runs here but its identity could not be verified: never idle, never killed.
-      if (under[0]!.unverified) return "ambiguous";
+      if (under.some((r) => r.unverified)) return "ambiguous";
       if (!isShell(under[0]!)) return under[0]!;
       shell = under[0]!;
     }

@@ -73,12 +73,12 @@ export function stimeMatches(stime: string, started: Date, psAt = new Date()): b
  * later, so it fails.
  *
  * `keepUnverified`: an MSYS link that fails verification is still applied, flagged
- * `unverified`. Dropping it would make a live harness vanish from under its seat shell,
+ * `unverified` (with its Windows `originalPpid`). Dropping it would make a live harness vanish from under its seat shell,
  * and "nothing runs there" is the dangerous direction (a handover would type into the
  * pane). Callers that need identity (lineage proof, kill targets) must not trust flagged rows.
  * No Git Bash (or ps fails) = the Windows snapshot unchanged.
  */
-export async function withMsysParents<T extends { pid: number; ppid: number; unverified?: boolean }>(
+export async function withMsysParents<T extends { pid: number; ppid: number; unverified?: boolean; originalPpid?: number }>(
   snapshot: () => Promise<T[]>,
   startedOf: (row: T) => Date | undefined,
   readPs: () => Promise<string> = async () =>
@@ -105,6 +105,6 @@ export async function withMsysParents<T extends { pid: number; ppid: number; unv
     const parent = msys!.get(r.pid)?.parentWinpid;
     if (!parent) return r;
     if (same(r.pid) && same(parent)) return { ...r, ppid: parent };
-    return opts.keepUnverified && byPid.has(parent) ? { ...r, ppid: parent, unverified: true } : r;
+    return opts.keepUnverified && byPid.has(parent) ? { ...r, ppid: parent, unverified: true, originalPpid: r.ppid } : r;
   });
 }
