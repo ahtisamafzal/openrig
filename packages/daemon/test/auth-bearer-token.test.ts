@@ -160,6 +160,12 @@ describe("auth-bearer-token middleware (PL-005 Phase B)", () => {
       ).rejects.toBeInstanceOf(AuthBearerTokenStartupError);
     });
 
+    it("whitespace-only bearer counts as no bearer", async () => {
+      await expect(
+        assertBindAuthInvariant({ host: "100.95.124.51", bearerToken: "   " }),
+      ).rejects.toBeInstanceOf(AuthBearerTokenStartupError);
+    });
+
     // Scenario 3: Tailscale magicDNS hostname, no bearer → REFUSED
     it("(3) magicDNS hostname that resolves to tailscale IP → throws", async () => {
       const dns = await import("node:dns");

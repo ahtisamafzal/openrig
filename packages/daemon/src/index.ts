@@ -279,7 +279,7 @@ export async function startServer(port?: number) {
   const explicitHost = bindPlan.mode === "explicit" ? bindPlan.hosts[0] : undefined;
   // PL-005 Phase B: bearer token for Mission Control write verbs.
   // No legacy alias (this env var is new in Phase B).
-  const bearerToken = process.env.OPENRIG_AUTH_BEARER_TOKEN ?? null;
+  const bearerToken = process.env.OPENRIG_AUTH_BEARER_TOKEN?.trim() || null;
 
   let bindHosts: string[];
   const terminalTokenEnv = process.env.OPENRIG_TERMINAL_BEARER_TOKEN?.trim();

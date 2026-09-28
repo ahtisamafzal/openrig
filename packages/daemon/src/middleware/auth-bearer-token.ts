@@ -252,7 +252,7 @@ export async function assertBindAuthInvariant(opts: {
     }
   }
 
-  if (opts.bearerToken && opts.bearerToken.length > 0) return;
+  if (opts.bearerToken?.trim()) return;
   throw new AuthBearerTokenStartupError(
     `daemon refusing to start: bind host '${opts.host}'${resolvedIp ? ` (resolves to ${resolvedIp})` : ""} is not loopback, ` +
       `and auth.bearerToken (env OPENRIG_AUTH_BEARER_TOKEN) is empty. ` +
