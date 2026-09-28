@@ -155,9 +155,11 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly paneShell: string;
   private readonly herdr: HerdrExecFn;
   private readonly openWindow: (session: string) => void;
-  // ponytail: in-memory only — session/server options and creation env are lost
-  // on daemon restart. Persist them (or use herdr report-metadata) if adoption
-  // after restart needs them.
+  // ponytail: in-memory only, deliberately. No daemon code reads session/server
+  // options back (claim writes @rigged_*, teardown clears them), and hasSessionEnv
+  // feeds one diagnostic that already reports null = unknown after a restart. Persist
+  // in OpenRig SQLite — not herdr report-metadata, which is display-only and may
+  // expire — once a reader appears.
   private readonly sessionOptions = new Map<string, Map<string, string>>();
   private readonly serverOptions = new Map<string, string>();
   private readonly sessionEnvKeys = new Map<string, Set<string>>();
