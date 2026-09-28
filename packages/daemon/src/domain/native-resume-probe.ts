@@ -184,7 +184,9 @@ export function assessNativeResumeProbe(
     }
     // A footer-only match (no "OpenAI Codex (v" header in view) is scrollback-shaped: a Codex
     // that rendered its footer and exited leaves it behind. Only trust it while the pane
-    // command is not a bare shell.
+    // command is not a bare shell. (A header over a shell stays as upstream had it: tmux
+    // panes can show a wrapper shell while Codex runs, and restore still requires the
+    // joined native-lineage proof before a seat counts as resumed.)
     const headerInView = paneContent.includes("OpenAI Codex (v");
     if (looksLikeCodexTui(paneContent) && (headerInView || !SHELL_COMMANDS.has(paneCommand))) {
       return {

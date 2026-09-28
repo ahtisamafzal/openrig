@@ -74,3 +74,4 @@ describe("withMsysParents brackets the MSYS snapshot (pid reuse)", () => {
     expect(out.find((r) => r.pid === 400)?.ppid).toBe(5); // pid reused between snapshots -> untouched
   });
 });
+

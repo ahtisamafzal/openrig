@@ -77,13 +77,38 @@ export interface ProcessRow { pid: number; ppid: number; name: string; started?:
 async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
     "-NoProfile", "-Command",
-    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.CreationDate.ToString('o')),$($_.Name)\" }",
+    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.CreationDate.ToString('yyyy-MM-ddTHH:mm:ss.fff')),$($_.Name)\" }",
   ], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   return stdout.split(/\r?\n/).flatMap((line) => {
     const [pid, ppid, started, ...rest] = line.split(",");
     const name = rest.join(",");
     return pid && ppid && name ? [{ pid: Number(pid), ppid: Number(ppid), name, started: started || undefined }] : [];
   });
+}
+
+/** Creation time as both CIM and Get-Process render it, to the millisecond. */
+const STARTED_FORMAT = "yyyy-MM-ddTHH:mm:ss.fff";
+
+/**
+ * Force-kill a harness tree WITHOUT a pid-reuse window: Get-Process opens and holds a
+ * handle, the start time is checked on that handle, and Kill() acts on the same handle.
+ * Children are matched by parent pid AND a creation time not before the harness's, so a
+ * reused pid is never a child. Exit 3 = the pid no longer belongs to the harness.
+ * ponytail: descendants are still stopped by pid after that check (sub-second window);
+ * pwsh 7's Process.Kill(true) would close it if it becomes a problem.
+ */
+export function handleBoundKillScript(pid: number, started: string): string {
+  if (!Number.isInteger(pid) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}$/.test(started)) throw new Error("bad kill target");
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Get-Process -Id ${pid}`,
+    "$null = $p.Handle",
+    `if ($p.StartTime.ToString('${STARTED_FORMAT}') -ne '${started}') { exit 3 }`,
+    "function Stop-Tree($id, $after) { Get-CimInstance Win32_Process -Filter \"ParentProcessId=$id\" | Where-Object { $_.CreationDate -ge $after } | ForEach-Object { Stop-Tree $_.ProcessId $_.CreationDate; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } }",
+    "Stop-Tree $p.Id $p.StartTime",
+    "$p.Kill()",
+    "exit 0",
+  ].join("; ");
 }
 
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
@@ -728,11 +753,17 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         await this.text(["pane", "send-keys", id, "ctrl+c"]);
       } else {
         // Windows reuses pids: re-check the harness is still the process we identified.
-        const now = h.started ? (await this.processTable().catch(() => [])).find((r) => r.pid === h.pid) : undefined;
-        if (!now || now.started !== h.started) {
-          return { ok: false, code: "ambiguous_harness", message: `refusing to force-kill pid ${h.pid} in ${paneId}: it no longer matches the identified harness` };
+        if (!h.started) {
+          return { ok: false, code: "ambiguous_harness", message: `refusing to force-kill pid ${h.pid} in ${paneId}: no creation time to pin its identity` };
         }
-        await execFileAsync("taskkill", ["/PID", String(h.pid), "/T", "/F"], { windowsHide: true });
+        try {
+          await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", handleBoundKillScript(h.pid, h.started)], { windowsHide: true });
+        } catch (err) {
+          if ((err as { code?: number }).code === 3) {
+            return { ok: false, code: "ambiguous_harness", message: `refusing to force-kill pid ${h.pid} in ${paneId}: it no longer matches the identified harness` };
+          }
+          throw err;
+        }
       }
       return { ok: true };
     } catch (err) {

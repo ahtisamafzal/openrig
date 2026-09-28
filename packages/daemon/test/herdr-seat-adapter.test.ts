@@ -431,25 +431,27 @@ describe("parseMsysParents (Git Bash fork/exec leaves Windows parents dead)", ()
   });
 });
 
-describe("KILL re-checks pid identity (Windows reuses pids)", () => {
-  it("refuses when the harness pid now belongs to a different process; kills when unchanged", async () => {
+describe("KILL is handle-bound (Windows reuses pids)", () => {
+  it("refuses a harness with no creation time to pin it", async () => {
     const h = fakeHerdr();
     const exec = async (args: string[]) =>
       args[0] === "pane" && args[1] === "process-info"
         ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
         : h.exec(args);
-    let harnessStart = "t1";
-    let reads = 0;
-    const processTable = async () => {
-      reads++;
-      return [
-        { pid: 100, ppid: 1, name: "powershell.exe", started: "t0" },
-        { pid: 200, ppid: 100, name: "bash.exe", started: "t0" },
-        { pid: 300, ppid: 200, name: "claude.exe", started: reads > 1 ? harnessStart : "t1" },
-      ];
-    };
-    harnessStart = "t9"; // pid 300 exited and was reused before the kill
+    const processTable = async () => [
+      { pid: 100, ppid: 1, name: "powershell.exe" },
+      { pid: 200, ppid: 100, name: "bash.exe" },
+      { pid: 300, ppid: 200, name: "claude.exe" },
+    ];
     const t = new HerdrSeatAdapter({ exec, processTable });
     expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+  });
+
+  it("the kill script checks the start time on the held handle before Kill()", async () => {
+    const { handleBoundKillScript } = await import("../src/adapters/herdr-seat-adapter.js");
+    const script = handleBoundKillScript(4242, "2026-09-28T23:17:58.113");
+    expect(script.indexOf("$p.Handle")).toBeLessThan(script.indexOf("StartTime"));
+    expect(script.indexOf("exit 3")).toBeLessThan(script.indexOf("$p.Kill()"));
+    expect(() => handleBoundKillScript(4242, "x'; Remove-Item C:\ -Recurse; '")).toThrow();
   });
 });
