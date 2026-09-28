@@ -19,6 +19,14 @@ import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RigSpec } from "../src/domain/types.js";
 
+// These tests drive the code against an in-memory fs keyed by POSIX paths; run the
+// code's path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 function mockTmux(): TmuxAdapter {
   return {
     createSession: vi.fn(async () => ({ ok: true as const })),

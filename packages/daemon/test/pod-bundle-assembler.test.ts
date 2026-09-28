@@ -1,9 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { vi, describe, it, expect } from "vitest";
 import nodePath from "node:path";
 import { PodBundleAssembler, type PodAssemblerFsOps } from "../src/domain/pod-bundle-assembler.js";
 import { validatePodBundleManifest, parsePodBundleManifest, serializePodBundleManifest, type PodBundleManifest } from "../src/domain/bundle-types.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 import type { RigSpec } from "../src/domain/types.js";
+
+// These tests drive the code against an in-memory fs keyed by POSIX paths; run the
+// code's path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
 
 // -- Mock filesystem --
 
