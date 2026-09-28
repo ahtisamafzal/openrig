@@ -637,20 +637,39 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   }
 
   /**
-   * The seat's harness: the process running under the pane's POSIX shell. Git Bash's
-   * bin\bash.exe launcher starts usr\bin\bash.exe, so the chain is
-   * PowerShell -> bash -> bash -> harness: skip the whole run of shells.
-   * null = the shell is back at its prompt; "no_shell" = the seat shell itself is gone.
+   * The seat's harness: the ONE process running under the pane's POSIX shell. Git Bash's
+   * bin\bash.exe launcher starts usr\bin\bash.exe (PowerShell -> bash -> bash -> harness),
+   * so a lone nested shell is followed down. herdr on Windows reports only the pane root as
+   * foreground, and process-table order says nothing about foreground, so two or more
+   * children under the shell (a background job, a hook) are "ambiguous": nothing that
+   * force-kills or reuses the pane may act on a guess.
+   * null = shell at its prompt; "no_shell" = the seat shell itself is gone.
    */
-  private async harness(paneId: string): Promise<ProcessRow | null | "no_pane" | "no_shell"> {
-    const chain = await this.paneChain(paneId);
-    if (!chain) return "no_pane";
+  private async harness(paneId: string): Promise<ProcessRow | null | "no_pane" | "no_shell" | "ambiguous"> {
+    const root = await this.getPanePid(paneId);
+    if (root == null) return "no_pane";
+    let rows: ProcessRow[];
+    try {
+      rows = await this.processTable();
+    } catch {
+      return "ambiguous"; // cannot see the tree: never treat as free or kill blind
+    }
+    const ignore = /^(conhost|OpenConsole)\.exe$/i;
     const shellBase = nodePath.win32.basename(this.paneShell).toLowerCase();
     const isShell = (p: ProcessRow) => p.name.toLowerCase() === shellBase;
-    let at = chain.findIndex((p, i) => i > 0 && isShell(p));
-    if (at < 0) return "no_shell";
-    while (chain[at + 1] && isShell(chain[at + 1]!)) at++;
-    return chain[at + 1] ?? null;
+    const kids = (pid: number) => rows.filter((r) => r.ppid === pid && !ignore.test(r.name));
+    const shells = kids(root).filter(isShell);
+    if (shells.length === 0) return "no_shell";
+    if (shells.length > 1) return "ambiguous";
+    let shell = shells[0]!;
+    for (let depth = 0; depth < 5; depth++) {
+      const under = kids(shell.pid);
+      if (under.length === 0) return null;
+      if (under.length > 1) return "ambiguous";
+      if (!isShell(under[0]!)) return under[0]!;
+      shell = under[0]!;
+    }
+    return "ambiguous";
   }
 
   /**
@@ -682,8 +701,12 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     const h = await this.harness(paneId);
     if (h === "no_pane") return { ok: false, code: "session_not_found", message: `no pid for ${paneId}` };
     if (h === null || h === "no_shell") return { ok: true }; // nothing left running under the seat shell
+    // Ctrl-C reaches the console's foreground whatever the tree looks like; a blind KILL does not.
+    if (h === "ambiguous" && signal === "KILL") {
+      return { ok: false, code: "ambiguous_harness", message: `refusing to force-kill in ${paneId}: more than one process runs under the seat shell` };
+    }
     try {
-      if (signal === "TERM") {
+      if (signal === "TERM" || h === "ambiguous") {
         const id = await this.paneId(paneId);
         await this.text(["pane", "send-keys", id, "ctrl+c"]);
         await new Promise((r) => setTimeout(r, INTERRUPT_GAP_MS));
@@ -765,6 +788,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   ): Promise<TmuxResult> {
     const h = await this.harness(paneTarget);
     if (h === "no_pane") return { ok: false, code: "session_not_found", message: `no herdr seat for ${paneTarget}` };
+    if (h === "ambiguous") return { ok: false, code: "pane_busy", message: `respawn refused: processes still run under the seat shell in ${paneTarget}` };
     if (h !== null && h !== "no_shell") return { ok: false, code: "pane_busy", message: `respawn refused: ${h.name} still runs in ${paneTarget}` };
     let envFile: string | null = null;
     try {

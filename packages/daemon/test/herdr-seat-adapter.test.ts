@@ -355,3 +355,43 @@ describe("msysEnvValue", () => {
     expect(msysEnvValue("PATH", "/usr/bin:/bin")).toBe("/usr/bin:/bin");
   });
 });
+
+describe("harness lineage is unambiguous or nothing acts on it", () => {
+  it("two children under the seat shell: KILL refuses, TERM still interrupts, respawn refuses, pane not free", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fakeHerdr();
+      const exec = async (args: string[]) =>
+        args[0] === "pane" && args[1] === "process-info"
+          ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+          : h.exec(args);
+      const processTable = async () => [
+        { pid: 100, ppid: 1, name: "powershell.exe" },
+        { pid: 200, ppid: 100, name: "bash.exe" },
+        { pid: 201, ppid: 200, name: "bash.exe" },
+        { pid: 300, ppid: 201, name: "claude.exe" },
+        { pid: 301, ppid: 201, name: "node.exe" }, // background job
+      ];
+      const t = new HerdrSeatAdapter({ exec, processTable });
+      expect(await t.isPaneDead("dev-impl@r")).toBe(false);
+      expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+      const term = t.signalPaneProcess("dev-impl@r", "TERM");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await term).toEqual({ ok: true });
+      expect(await t.respawnPane("dev-impl@r", "codex")).toMatchObject({ ok: false, code: "pane_busy" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an unreadable process table is never read as a free pane", async () => {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) =>
+      args[0] === "pane" && args[1] === "process-info"
+        ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+        : h.exec(args);
+    const t = new HerdrSeatAdapter({ exec, processTable: async () => { throw new Error("CIM down"); } });
+    expect(await t.isPaneDead("dev-impl@r")).toBe(false);
+    expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+  });
+});
