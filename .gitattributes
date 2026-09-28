@@ -1,0 +1,8 @@
+# Check text out with LF everywhere. With core.autocrlf=true (the Git for Windows
+# default) every shipped skill/manifest/spec lands as CRLF, and the daemon's
+# frontmatter and YAML readers (which expect \n) misread them on Windows.
+* text=auto eol=lf
+
+# Windows-only launchers keep CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
