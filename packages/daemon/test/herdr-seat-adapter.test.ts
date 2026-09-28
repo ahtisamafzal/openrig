@@ -86,6 +86,7 @@ describe("HerdrSeatAdapter", () => {
     const h = fakeHerdr();
     const t = new HerdrSeatAdapter({ exec: h.exec });
     expect(await t.sendText("dev-impl@r", "one\ntwo")).toEqual({ ok: true });
+    await t.sendKeys("dev-impl@r", ["C-c"]); // close the input transaction (no submit-recheck timers)
     expect(await t.sendText("dev-impl@r", "single")).toEqual({ ok: true });
     const sends = h.calls.filter((c) => c[1] === "send-text").map((c) => c[3]);
     expect(sends).toEqual(["\x1b[200~one\ntwo\x1b[201~", "single"]);
@@ -223,21 +224,44 @@ describe("per-pane input transaction", () => {
     }
   });
 
-  it("an unsubmitted paste releases the pane after 10s", async () => {
+  it("an unsubmitted paste is cleared (Ctrl-C) and releases the pane after 30s", async () => {
     vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const h = fakeHerdr();
       const t = new HerdrSeatAdapter({ exec: h.exec });
       await t.sendText("dev-impl@r", "never submitted");
       let second = false;
       const p = t.sendText("dev-impl@r", "next").then(() => (second = true));
-      await vi.advanceTimersByTimeAsync(9_000);
+      await vi.advanceTimersByTimeAsync(29_000);
       expect(second).toBe(false);
       await vi.advanceTimersByTimeAsync(2_000);
       await p;
       expect(second).toBe(true);
+      const keys = h.calls.filter((c) => c[1] === "send-keys" || c[1] === "send-text").map((c) => c[3]);
+      expect(keys).toEqual(["never submitted", "ctrl+c", "next"]);
     } finally {
+      warn.mockRestore();
       vi.useRealTimers();
+    }
+  });
+
+  it("a failed chunk clears the partial input before the next sender", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = fakeHerdr();
+      let chunks = 0;
+      const exec = async (args: string[]) => {
+        if (args[1] === "send-text" && args[3]!.startsWith("x") && ++chunks === 2) throw new Error("herdr died mid-paste");
+        return h.exec(args);
+      };
+      const t = new HerdrSeatAdapter({ exec });
+      expect((await t.sendText("dev-impl@r", "x".repeat(9000))).ok).toBe(false);
+      await t.sendText("dev-impl@r", "next");
+      const seq = h.calls.filter((c) => c[1] === "send-keys" || c[1] === "send-text").map((c) => (c[3]!.startsWith("x") ? "x…" : c[3]));
+      expect(seq).toEqual(["x…", "ctrl+c", "next"]);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

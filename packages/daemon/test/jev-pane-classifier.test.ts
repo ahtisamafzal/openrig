@@ -43,6 +43,23 @@ describe("classifyPaneWithJev (offline)", () => {
     expect(out).toContain("password=[redacted]");
   });
 
+  it("masks credential assignments, URL passwords, npm tokens and private keys", () => {
+    const out = redactSecrets([
+      "DATABASE_URL=postgres://app:s3cretPw@db.internal:5432/prod",
+      "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "GITHUB_TOKEN: abc123def456ghi789",
+      "db_password = 'tiger-tiger'",
+      "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnopqrstuvwxyz0123",
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU",
+      "-----END OPENSSH PRIVATE KEY-----",
+      "Working (3s • esc to interrupt)",
+    ].join("\n"));
+    for (const secret of ["s3cretPw", "wJalrXUtnFEMI", "abc123def456", "tiger-tiger", "npm_abcdef", "b3BlbnNzaC1"]) expect(out).not.toContain(secret);
+    expect(out).toContain("postgres://app:[redacted]@db.internal");
+    expect(out).toContain("Working (3s • esc to interrupt)");
+  });
+
   it("never caches idle (a stable prompt screen must be re-asked)", async () => {
     const ff = fakeFetch(answer(0.05, 0.1), answer(0.05, 0.1));
     await classifyPaneWithJev("quiet", { env, fetch: ff.f });

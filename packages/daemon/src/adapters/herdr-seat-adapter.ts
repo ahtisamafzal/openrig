@@ -31,7 +31,7 @@ const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
 const PASTE_SETTLE_MS = 600;
 const SUBMIT_CHECK_MS = 2500;
 const SUBMIT_RETRIES = 6; // ~15s: covers Codex startup hooks + MCP boot
-const INPUT_HOLD_MS = 10_000; // max time a pasted-but-unsubmitted input holds the pane
+const INPUT_HOLD_MS = 30_000; // max time a pasted-but-unsubmitted input holds the pane
 
 /**
  * A Codex paste placeholder still sitting in the COMPOSER. The composer is the
@@ -407,6 +407,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
 
   override async sendText(target: string, text: string): Promise<TmuxResult> {
     let id: string | undefined;
+    let wrote = false;
     try {
       id = await this.paneId(target);
       // One input transaction per pane: this text plus its submit. A concurrent send
@@ -420,10 +421,12 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       // Windows caps a command line near 32K chars; send long text in slices.
       for (let i = 0; i < payload.length; i += 8000) {
         await this.text(["pane", "send-text", id, payload.slice(i, i + 8000)]);
+        wrote = true;
       }
       return { ok: true };
     } catch (err) {
-      if (id) this.endInput(id);
+      // Partial write: clear the half-typed input before the next sender gets the pane.
+      if (id && this.inputLock.has(id)) await (wrote ? this.abandonInput(id, "partial write") : this.endInput(id));
       return this.fail(err);
     }
   }
@@ -433,9 +436,19 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     let resolve!: () => void;
     const done = new Promise<void>((r) => (resolve = r));
     // A caller that never submits must not wedge the pane forever.
-    const timer = setTimeout(() => this.endInput(id), INPUT_HOLD_MS);
+    // ponytail: the lease has no owner token (sendKeys cannot tell callers apart), so a
+    // caller that submits after its lease expired could hit the next sender's input.
+    // 30s is ~30x the normal text-to-Enter gap; add owner tokens if expiries are logged.
+    const timer = setTimeout(() => void this.abandonInput(id, "lease expired"), INPUT_HOLD_MS);
     timer.unref?.();
     this.inputLock.set(id, { done, release: () => { clearTimeout(timer); resolve(); } });
+  }
+
+  /** Cancel an unfinished input (Ctrl-C clears the agent's composer), then free the pane. */
+  private async abandonInput(id: string, why: string): Promise<void> {
+    console.warn(`[herdr] ${id}: clearing unsubmitted input (${why})`);
+    await this.text(["pane", "send-keys", id, "ctrl+c"]).catch(() => {});
+    this.endInput(id);
   }
 
   private endInput(id: string): void {

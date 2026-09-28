@@ -38,21 +38,30 @@ export function jevPaneEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.TYPESAFE_API_KEY?.trim()) && (optIn === "1" || optIn === "true");
 }
 
-// ponytail: a pattern list, not a DLP engine; extend as new secret shapes show up.
+// BEST-EFFORT masking, not a DLP guarantee: known token shapes plus anything that
+// looks like a credential assignment. Operators who cannot accept that boundary
+// leave OPENRIG_JEV_PANE_CLASSIFICATION unset. Extend as new shapes show up.
 const SECRET_PATTERNS: RegExp[] = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, // OpenAI / OpenRouter / Stripe-style keys
   /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g,
+  /\bnpm_[A-Za-z0-9]{20,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
   /\bapikey_[A-Za-z0-9]{10,}/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, // JWT
 ];
-// Keep the label, mask the value: "Bearer x", "password=x", "api_key: x".
-const LABELLED_SECRET = /\b(bearer\s+|(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*)\S+/gi;
+// Keep the label, mask the value.
+const LABELLED_SECRETS: RegExp[] = [
+  /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+(?=@)/gi, // scheme://user:PASSWORD@host
+  /(\bbearer\s+)\S+/gi,
+  // NAME=value / name: value where the name mentions a credential word (API_KEY, DB_PASSWORD, …)
+  /(\b[A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|auth)[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?)[^\s"']+/gi,
+];
 
 export function redactSecrets(text: string): string {
   const masked = SECRET_PATTERNS.reduce((t, re) => t.replace(re, "[redacted]"), text);
-  return masked.replace(LABELLED_SECRET, "$1[redacted]");
+  return LABELLED_SECRETS.reduce((t, re) => t.replace(re, "$1[redacted]"), masked);
 }
 
 /** Combine the two P(yes) answers into a state, or null when Jev is unsure. */
