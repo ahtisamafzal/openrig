@@ -113,7 +113,7 @@ export function handleBoundKillScript(pid: number, started: string): string {
 
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
 async function defaultProcessTable(msysPs: string): Promise<ProcessRow[]> {
-  return withMsysParents(cimProcessTable, (r) => r.started, async () =>
+  return withMsysParents(cimProcessTable, (r) => (r.started ? new Date(r.started) : undefined), async () =>
     (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout);
 }
 

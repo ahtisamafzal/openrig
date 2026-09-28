@@ -55,23 +55,36 @@ describe("Codex probe: stale footer in scrollback", () => {
   });
 });
 
-describe("withMsysParents brackets the MSYS snapshot (pid reuse)", () => {
-  it("re-parents only when child and parent kept pid + start time across both Windows snapshots", async () => {
+describe("withMsysParents trusts a link only when ps STIME still matches (pid reuse)", () => {
+  it("re-parents a matching child/parent; leaves a pid whose start time changed", async () => {
     const { withMsysParents } = await import("../src/domain/msys-parents.js");
+    const today = new Date();
+    const at = (h: number, m: number, s: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), h, m, s);
     const ps = [
       "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND",
-      "      10       1      10        200  cons0     1 22:00:00 /usr/bin/bash",
-      "      11      10      11        300  cons0     1 22:00:01 /c/npm/claude",
-      "      12      10      12        400  cons0     1 22:00:02 /c/npm/other",
+      "      10       1      10        200  cons0     1 00:00:01 /usr/bin/bash",
+      "      11      10      11        300  cons0     1 00:00:02 /c/npm/claude",
+      "      12      10      12        400  cons0     1 00:00:03 /c/npm/other",
     ].join("\n");
-    const snaps = [
-      [{ pid: 200, ppid: 100, s: "a" }, { pid: 300, ppid: 999, s: "b" }, { pid: 400, ppid: 999, s: "c" }],
-      [{ pid: 200, ppid: 100, s: "a" }, { pid: 300, ppid: 999, s: "b" }, { pid: 400, ppid: 5, s: "REUSED" }],
+    const rows = [
+      { pid: 200, ppid: 100, t: at(0, 0, 1) },
+      { pid: 300, ppid: 999, t: at(0, 0, 2) },
+      { pid: 400, ppid: 999, t: new Date(Date.now() + 3_600_000) }, // pid 400 reused after ps ran
     ];
-    let n = 0;
-    const out = await withMsysParents(async () => snaps[n++]!, (r) => r.s, async () => ps);
-    expect(out.find((r) => r.pid === 300)?.ppid).toBe(200); // stable -> re-parented
-    expect(out.find((r) => r.pid === 400)?.ppid).toBe(5); // pid reused between snapshots -> untouched
+    const out = await withMsysParents(async () => rows, (r) => r.t, async () => ps);
+    expect(out.find((r) => r.pid === 300)?.ppid).toBe(200);
+    expect(out.find((r) => r.pid === 400)?.ppid).toBe(999);
+  });
+
+  it("stimeMatches: STIME <= started <= ps time; 'Mon D' for older processes", async () => {
+    const { stimeMatches } = await import("../src/domain/msys-parents.js");
+    const now = new Date(2026, 8, 29, 12, 0, 0);
+    expect(stimeMatches("11:59:58", new Date(2026, 8, 29, 11, 59, 58), now)).toBe(true);
+    // exec'd native program (claude.exe under the sh shim) starts a moment after the MSYS STIME
+    expect(stimeMatches("11:59:58", new Date(2026, 8, 29, 11, 59, 59), now)).toBe(true);
+    expect(stimeMatches("11:59:58", new Date(2026, 8, 29, 11, 59, 57), now)).toBe(false); // before STIME
+    expect(stimeMatches("11:59:58", new Date(2026, 8, 29, 12, 0, 5), now)).toBe(false); // after ps ran: reused
+    expect(stimeMatches("Sep 27", new Date(2026, 8, 27, 8, 0, 0), now)).toBe(true);
+    expect(stimeMatches("Sep 27", new Date(2026, 8, 29, 8, 0, 0), now)).toBe(false); // reused today
   });
 });
-
