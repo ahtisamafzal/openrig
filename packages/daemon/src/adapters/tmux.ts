@@ -111,6 +111,11 @@ const PANE_FORMAT = [
 ].join(TMUX_FIELD_SEPARATOR);
 const CLIENT_FORMAT = "#{client_name}\t#{client_session}";
 
+/** psmux (native Windows tmux) quirks apply only when explicitly selected. */
+function isPsmux(): boolean {
+  return process.env.OPENRIG_SEAT_HOST === "psmux";
+}
+
 /** The tmux-authored text of an exec error (after node's "Command failed: <cmd>" line). */
 function extractTmuxText(err: Error): string {
   return err.message.split("\n").slice(1).join("\n").trim();
@@ -255,7 +260,7 @@ export class TmuxAdapter {
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
       // psmux (Windows) starts noticeably slower than tmux.
-      const attempts = process.platform === "win32" ? 120 : 20;
+      const attempts = isPsmux() ? 120 : 20;
       for (let attempt = 0; attempt < attempts; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
@@ -322,7 +327,7 @@ export class TmuxAdapter {
       }
       // psmux (native Windows tmux) exits 1 with no message for a missing
       // session. A reachable server then proves absence; otherwise fail closed.
-      if (process.platform === "win32" && err instanceof Error && !extractTmuxText(err)) {
+      if (isPsmux() && err instanceof Error && !extractTmuxText(err)) {
         try {
           await this.exec("tmux list-sessions");
           return { state: "absent" };
@@ -352,7 +357,7 @@ export class TmuxAdapter {
       : "";
     // psmux defaults panes to PowerShell and runs the pane command through it;
     // seats expect a POSIX shell. Name Git Bash explicitly (plain `bash` is WSL).
-    const paneShell = process.platform === "win32"
+    const paneShell = isPsmux()
       ? ` ${shellQuote(`& "${process.env.OPENRIG_PANE_SHELL ?? "C:\\Program Files\\Git\\bin\\bash.exe"}"`)}`
       : "";
     const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}${envFlags}${paneShell}`;
@@ -746,7 +751,9 @@ export class TmuxAdapter {
   /** Get a session-scoped user option value. Returns null if not set or error. */
   async getSessionOption(sessionName: string, key: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux show-options -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      // psmux lacks the singular `show-option` alias.
+      const verb = isPsmux() ? "show-options" : "show-option";
+      const output = await this.exec(`tmux ${verb} -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
       return output.trim() || null;
     } catch {
       return null;

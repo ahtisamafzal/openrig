@@ -22,6 +22,7 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
+import { HerdrSeatAdapter } from "./adapters/herdr-seat-adapter.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execCommand } from "./adapters/tmux-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
@@ -386,7 +387,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
+  // Seat host: tmux by default; herdr on native Windows (or OPENRIG_SEAT_HOST=herdr).
+  const seatHost = process.env.OPENRIG_SEAT_HOST ?? (process.platform === "win32" && !opts?.tmuxExec ? "herdr" : "tmux");
+  const tmuxAdapter = seatHost === "herdr"
+    ? new HerdrSeatAdapter()
+    : new TmuxAdapter(opts?.tmuxExec ?? execCommand);
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
   // Lives at module scope so the projection chain (PsProjectionService,
