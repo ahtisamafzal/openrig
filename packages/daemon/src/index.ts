@@ -1,3 +1,5 @@
+// Must stay first: hides console windows for every child process on Windows.
+import "./windows-hide.js";
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";

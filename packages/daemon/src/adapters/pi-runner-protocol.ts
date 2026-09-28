@@ -117,6 +117,12 @@ export const PI_PROVIDER_ENV_VARS: Record<string, string> = {
 // Baseline process needs. No host credential families or shell customization.
 export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
+// Windows programs (node included) break without these: SystemRoot for crypto
+// and sockets, the profile dirs for config, PATHEXT/COMSPEC for resolution.
+export const PI_ENV_WINDOWS_VARS = [
+  "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+] as const;
+
 // NodeLauncher supplies identity and instance routing on both fresh and resumed
 // seats. Pi's shell tools inherit this child env: dropping these values makes
 // ordinary whoami/send/queue resolve as an unmanaged caller or another instance.
@@ -141,9 +147,11 @@ export function providerFromModel(model: string | undefined): string | null {
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
   opts: { agentDir: string; sessionsDir: string; model?: string },
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
+  const windows = platform === "win32" ? PI_ENV_WINDOWS_VARS : [];
+  for (const name of [...PI_ENV_BASELINE_VARS, ...windows, ...PI_ENV_OPENRIG_VARS]) {
     const value = source[name];
     if (value !== undefined) env[name] = value;
   }

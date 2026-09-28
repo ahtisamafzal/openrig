@@ -32,6 +32,26 @@ import {
   type PiRunnerState,
 } from "./pi-runner-protocol.js";
 
+/** Windows: npm installs `pi` as a `.cmd` shim, which spawn() cannot run without
+ *  a shell, and a shell would re-split quoted args. Run the shim's JS entry under
+ *  this node instead. Elsewhere (or if no shim is found) spawn `pi` as before. */
+export function resolvePiSpawn(
+  args: string[],
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+  readFile: (path: string) => string = (path) => fs.readFileSync(path, "utf8"),
+): { command: string; args: string[] } {
+  if (platform !== "win32") return { command: "pi", args };
+  for (const dir of (env.PATH ?? env.Path ?? "").split(";")) {
+    if (!dir) continue;
+    let shim: string;
+    try { shim = readFile(nodePath.win32.join(dir, "pi.cmd")); } catch { continue; }
+    const entry = /"%dp0%\\([^"]+\.js)"/.exec(shim)?.[1];
+    if (entry) return { command: process.execPath, args: [nodePath.win32.join(dir, entry), ...args] };
+  }
+  return { command: "pi", args };
+}
+
 // ── Submitted input boundaries ─────────────────────────────────────────────
 // Canonical TTY buffers can overflow before Node sees even the paste terminator.
 // Use Node's line editor in raw mode, with only paste framing handled here.
@@ -568,7 +588,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[pi-runner] starting pi --mode rpc (seat ${args.sessionName})`);
   console.log(`[pi-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  const child = spawn("pi", childArgs, {
+  const piCommand = resolvePiSpawn(childArgs, childEnv);
+  const child = spawn(piCommand.command, piCommand.args, {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
