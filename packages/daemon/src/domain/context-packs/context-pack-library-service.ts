@@ -18,6 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { isPathInsideRoot } from "../cwd-resolution.js";
 import { stringify as stringifyYaml } from "yaml";
 import { assemblePlainFiles, type PlainFileAssembly } from "./bundle-assembler.js";
 import { assertSafePackRef } from "./ref-safety.js";
@@ -420,7 +421,7 @@ export class ContextPackLibraryService {
       );
     }
     const abs = join(packEntry.sourcePath, relPath);
-    if (!abs.startsWith(packEntry.sourcePath + "/") && abs !== packEntry.sourcePath) {
+    if (!isPathInsideRoot(abs, packEntry.sourcePath)) {
       throw new ContextPackError(
         "file_outside_pack",
         `resolved path '${abs}' falls outside pack '${packEntry.sourcePath}'`,

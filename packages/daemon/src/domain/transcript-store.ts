@@ -1,5 +1,6 @@
 import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { isPathInsideRoot } from "./cwd-resolution.js";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { getLastCaptureAt } from "./transcript-rotation.js";
@@ -196,7 +197,7 @@ export class TranscriptStore {
   getTranscriptPath(rigName: string, sessionName: string): string {
     const resolved = join(this.root, rigName, `${sessionName}.log`);
     // Guard against path traversal from rig/session names containing ".."
-    if (!resolved.startsWith(this.root + "/") && resolved !== this.root) {
+    if (!isPathInsideRoot(resolved, this.root)) {
       return join(this.root, "_unsafe", `${sessionName}.log`);
     }
     return resolved;
@@ -236,7 +237,7 @@ export class TranscriptStore {
     try {
       const dir = join(this.root, rigName);
       // Guard against path traversal
-      if (!dir.startsWith(this.root + "/") && dir !== this.root) {
+      if (!isPathInsideRoot(dir, this.root)) {
         return false;
       }
       mkdirSync(dir, { recursive: true });
