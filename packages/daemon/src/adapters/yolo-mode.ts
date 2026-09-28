@@ -113,8 +113,3 @@ function seatStrictMcp(env: NodeJS.ProcessEnv): boolean {
   return v === "1" || v === "true";
 }
 
-/** Codex counterpart of claudeMcpArgs: turn off the operator's plugins (their MCP servers
- *  and hooks) and the apps/computer-use tool servers for the seat. "" when off. */
-export function codexMcpArgs(env: NodeJS.ProcessEnv): string {
-  return seatStrictMcp(env) ? " --disable plugins --disable apps --disable computer_use" : "";
-}

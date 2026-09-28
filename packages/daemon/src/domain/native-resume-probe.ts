@@ -1,5 +1,5 @@
 import { shellQuote } from "../adapters/shell-quote.js";
-import { codexPostureArg, codexMcpArgs } from "../adapters/yolo-mode.js";
+import { codexPostureArg } from "../adapters/yolo-mode.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -70,7 +70,7 @@ export function buildCodexResumeCore(
   const modelArg = model ? ` -m ${shellQuote(model)}` : "";
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
-  const daemonArg = (daemonOptOut ? " --no-daemon" : "") + codexMcpArgs(process.env);
+  const daemonArg = daemonOptOut ? " --no-daemon" : "";
   return `codex${daemonArg}${profileOrPosture}${modelArg} resume ${middle}${tokenArg}`;
 }
 
