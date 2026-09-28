@@ -17,6 +17,8 @@ import nodePath from "node:path";
 import { promisify } from "node:util";
 import { shellQuote } from "./shell-quote.js";
 import { isShellForeground } from "../domain/shell-classifier.js";
+import { msysPsPath, withMsysParents } from "../domain/msys-parents.js";
+export { parseMsysParents } from "../domain/msys-parents.js";
 import {
   TmuxAdapter,
   type SessionProbe,
@@ -71,7 +73,7 @@ export interface HerdrSeatAdapterOptions {
 
 export interface ProcessRow { pid: number; ppid: number; name: string }
 
-async function defaultProcessTable(): Promise<ProcessRow[]> {
+async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
     "-NoProfile", "-Command",
     "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name)\" }",
@@ -80,6 +82,11 @@ async function defaultProcessTable(): Promise<ProcessRow[]> {
     const [pid, ppid, name] = line.split(",");
     return pid && ppid && name ? [{ pid: Number(pid), ppid: Number(ppid), name }] : [];
   });
+}
+
+/** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
+async function defaultProcessTable(msysPs: string): Promise<ProcessRow[]> {
+  return withMsysParents(await cimProcessTable(), msysPs);
 }
 
 interface HerdrPaneInfo {
@@ -224,7 +231,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     this.paneShell = opts.paneShell ?? process.env.OPENRIG_PANE_SHELL ?? "C:\\Program Files\\Git\\bin\\bash.exe";
     this.herdr = opts.exec ?? defaultExec(this.session);
     this.openWindow = opts.openWindow ?? defaultOpenWindow;
-    this.processTable = opts.processTable ?? defaultProcessTable;
+    const msysPs = msysPsPath(this.paneShell);
+    this.processTable = opts.processTable ?? (() => defaultProcessTable(msysPs));
   }
 
   // ---- herdr plumbing -------------------------------------------------------
@@ -604,11 +612,15 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   }
 
   /**
-   * herdr on Windows only sees the pane's root process (PowerShell). Walk the
-   * Windows process tree from it and report the deepest descendant, which is
-   * `bash` at the seat prompt and the harness (`claude`, `node`, ...) when one runs.
+   * herdr on Windows only sees the pane's root process (PowerShell). Report the harness
+   * under the seat shell (`claude`, `node`, ...) when one runs — NOT the deepest process:
+   * Claude spawns its own bash for tool calls, which read as "bash contradicts claude-code"
+   * and failed restore proof. At the prompt (or when ambiguous) fall back to the deepest
+   * descendant, i.e. `bash`.
    */
   override async getPaneCommand(paneId: string): Promise<string | null> {
+    const h = await this.harness(paneId);
+    if (h && typeof h === "object") return h.name.replace(/\.exe$/i, "");
     const chain = await this.paneChain(paneId);
     if (!chain) return null;
     const name = chain.at(-1)?.name || (await this.processInfo(paneId))?.foreground_processes?.[0]?.name;

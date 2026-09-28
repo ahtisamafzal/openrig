@@ -16,8 +16,11 @@ export interface NativeProcessRow {
 
 export type NativeRuntime = "claude-code" | "codex";
 
-function tokens(command: string): string[] {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
+// A double-quoted token may carry \" escapes: Windows command lines encode any argv entry
+// containing a quote that way (e.g. codex -c "k=\"v\""), and splitting at the inner quote
+// shifted every later token, so a real `resume <id>` went unseen.
+export function tokens(command: string): string[] {
+  return command.match(/"(?:\\.|[^"\\])*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
 }
 
 function executableName(token: string): string {

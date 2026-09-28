@@ -1,6 +1,7 @@
 import { existsSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
+import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 
 // --- Types ---
@@ -1078,8 +1079,11 @@ export class RestoreCheckService {
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
     // OPR.0.3.2.14 — subpath scrubbed (internal-team layout → generic placeholder).
-    const substrateRoot = this.deps.substrateRoot ?? join(process.env["HOME"] ?? "~", ".openrig", "shared-docs");
-    const rigRoot = join(substrateRoot, "rigs", rig.name);
+    // Same resolution as the codex adapter and topology walkers: OPENRIG_SHARED_DOCS_ROOT, else
+    // ~/.openrig/shared-docs (was: always $HOME, so a configured root read as "spec missing").
+    const rigRoot = this.deps.substrateRoot
+      ? join(this.deps.substrateRoot, "rigs", rig.name)
+      : join(resolveLegacyTopologyRigsRoot(), rig.name);
     const rigYaml = join(rigRoot, "rig.yaml");
 
     if (!this.deps.exists(rigRoot)) {

@@ -34,3 +34,11 @@ describe.runIf(process.platform === "win32")("Codex lineage proof on Windows (no
     expect(await check(() => [...windowsRows(), { ...windowsRows()[2]!, pid: 13 }])).toBeNull();
   });
 });
+
+describe("tokens() understands Windows \\\" escapes inside double quotes", () => {
+  it("keeps an escaped-quote config value as ONE token so `resume <id>` stays visible", async () => {
+    const { tokens } = await import("../src/domain/native-process-lineage.js");
+    const cmd = String.raw`codex.exe --no-daemon -c "shell_environment_policy.set.OPENRIG_NODE_ID=\"n1\"" resume --add-dir F:\x 01a0e9df-0db6-7ec3-ae17-36fe8d5f8542`;
+    expect(tokens(cmd)).toEqual(["codex.exe", "--no-daemon", "-c", String.raw`shell_environment_policy.set.OPENRIG_NODE_ID=\"n1\"`, "resume", "--add-dir", String.raw`F:\x`, "01a0e9df-0db6-7ec3-ae17-36fe8d5f8542"]);
+  });
+});

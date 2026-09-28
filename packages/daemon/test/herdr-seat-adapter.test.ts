@@ -395,3 +395,38 @@ describe("harness lineage is unambiguous or nothing acts on it", () => {
     expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
   });
 });
+
+describe("getPaneCommand reports the harness, not a tool subprocess", () => {
+  it("claude running its own bash tool still reads as claude", async () => {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) =>
+      args[0] === "pane" && args[1] === "process-info"
+        ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+        : h.exec(args);
+    const processTable = async () => [
+      { pid: 100, ppid: 1, name: "powershell.exe" },
+      { pid: 200, ppid: 100, name: "bash.exe" },
+      { pid: 201, ppid: 200, name: "bash.exe" },
+      { pid: 300, ppid: 201, name: "claude.exe" },
+      { pid: 400, ppid: 300, name: "bash.exe" }, // Claude's Bash tool
+    ];
+    const t = new HerdrSeatAdapter({ exec, processTable });
+    expect(await t.getPaneCommand("dev-impl@r")).toBe("claude");
+  });
+});
+
+describe("parseMsysParents (Git Bash fork/exec leaves Windows parents dead)", () => {
+  it("maps each process's Windows pid to its MSYS parent's Windows pid", async () => {
+    const { parseMsysParents } = await import("../src/adapters/herdr-seat-adapter.js");
+    const ps = [
+      "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND",
+      "   210767       1  210767      14892  cons0     197609 22:37:37 /usr/bin/bash",
+      "   210815  210767  210815      38540  cons0     197609 22:37:40 /c/Users/a/npm/claude",
+      "I  211067       1  211067      50776  cons1     197609 22:37:57 /usr/bin/bash",
+    ].join("\n");
+    const parents = parseMsysParents(ps);
+    expect(parents.get(38540)).toBe(14892); // claude.exe really sits under the seat bash
+    expect(parents.has(14892)).toBe(false); // PPID 1 = no MSYS parent
+    expect(parents.has(50776)).toBe(false);
+  });
+});

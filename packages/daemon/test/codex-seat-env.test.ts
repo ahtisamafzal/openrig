@@ -26,3 +26,18 @@ describe("codexSeatEnvArg (seat identity survives shell_environment_policy)", ()
     },
   );
 });
+
+describe("Codex resumed-TUI probe", () => {
+  it("recognises the current Codex footer (upper-case model id) as an interactive conversation", async () => {
+    const { assessNativeResumeProbe } = await import("../src/domain/native-resume-probe.js");
+    const screen = [
+      "• node_id",
+      "  team-review@arete-trio",
+      "› Ask Codex to do anything",
+      "",
+      "  GPT-5.6-Sol default fast · F:\Projects\arete-rig-sandbox · Restore seat handover context",
+      "  ? for shortcuts                                    ⚠ 4 warnings · f2 to view",
+    ].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node", paneContent: screen })).toMatchObject({ status: "resumed" });
+  });
+});

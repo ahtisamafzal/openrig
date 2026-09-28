@@ -16,6 +16,7 @@ import {
   isProbeShellReady,
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { withMsysParents } from "./msys-parents.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -357,7 +358,8 @@ export function windowsCensusRows(stdout: string): WindowsProcessRow[] {
 export async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
   const stdout = await runAsyncSite("resume_metadata.list_processes", async () =>
     (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout);
-  return windowsCensusRows(stdout);
+  // Git Bash fork/exec leaves seat harnesses with dead Windows parents; lineage needs MSYS's.
+  return withMsysParents(windowsCensusRows(stdout));
 }
 
 /** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn

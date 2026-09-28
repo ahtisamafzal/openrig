@@ -302,7 +302,8 @@ function looksLikeCodexTui(paneContent: string): boolean {
     const text = line.trimStart();
     return text.startsWith("›") && !/^\d+\.\s/.test(text.slice(1).trimStart());
   });
-  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
+  // Codex 0.15x prints "GPT-5.6-Sol default fast · <cwd>": model id casing varies.
+  const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/i.test(recentLines);
   return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter);
 }
 
