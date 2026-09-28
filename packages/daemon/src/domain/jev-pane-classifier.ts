@@ -5,9 +5,13 @@
 // Jev is most accurate with one plain question each, so it answers two yes/no
 // questions in one call and the state is combined here.
 //
-// Contract: opt-in via TYPESAFE_API_KEY, never throws, returns null when off,
-// failing or unsure. Asymmetric: "needs input" (which blocks a send) needs less
-// certainty than "idle" (which lets a send land).
+// DATA BOUNDARY: the bottom 8 lines of a seat's terminal go to api.typesafe.ai.
+// Needs BOTH TYPESAFE_API_KEY and OPENRIG_JEV_PANE_CLASSIFICATION=1; common
+// secret shapes are masked first (redactSecrets).
+//
+// Contract: never throws; null when off, failing or unsure. Jev's "idle" is
+// display-only: callers must not treat it as permission to send (see
+// session-transport), and idle answers are never cached.
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const TIMEOUT_MS = 3_000;
@@ -30,7 +34,25 @@ export function resetJevPaneClassifier(): void {
 }
 
 export function jevPaneEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env.TYPESAFE_API_KEY?.trim());
+  const optIn = env.OPENRIG_JEV_PANE_CLASSIFICATION;
+  return Boolean(env.TYPESAFE_API_KEY?.trim()) && (optIn === "1" || optIn === "true");
+}
+
+// ponytail: a pattern list, not a DLP engine; extend as new secret shapes show up.
+const SECRET_PATTERNS: RegExp[] = [
+  /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, // OpenAI / OpenRouter / Stripe-style keys
+  /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bapikey_[A-Za-z0-9]{10,}/g,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, // JWT
+];
+// Keep the label, mask the value: "Bearer x", "password=x", "api_key: x".
+const LABELLED_SECRET = /\b(bearer\s+|(?:password|passwd|secret|token|api[_-]?key)\s*[:=]\s*)\S+/gi;
+
+export function redactSecrets(text: string): string {
+  const masked = SECRET_PATTERNS.reduce((t, re) => t.replace(re, "[redacted]"), text);
+  return masked.replace(LABELLED_SECRET, "$1[redacted]");
 }
 
 /** Combine the two P(yes) answers into a state, or null when Jev is unsure. */
@@ -49,7 +71,7 @@ export async function classifyPaneWithJev(
   const key = env.TYPESAFE_API_KEY?.trim();
   const now = (deps.now ?? Date.now)();
   const text = screen.trim();
-  if (!key || !text || now < downUntil) return null;
+  if (!key || !text || now < downUntil || !jevPaneEnabled(env)) return null;
   if (cache.has(text)) return cache.get(text)!;
 
   let verdict: JevPaneVerdict | null = null;
@@ -60,7 +82,7 @@ export async function classifyPaneWithJev(
       body: JSON.stringify({
         model: env.TYPESAFE_DEFAULT_MODEL?.trim() || "jev-latest",
         // The agent's current state lives at the bottom; older lines only add noise.
-        state: text.split("\n").filter((l) => l.trim()).slice(-8).join("\n"),
+        state: redactSecrets(text.split("\n").filter((l) => l.trim()).slice(-8).join("\n")),
         questions: {
           busy: {
             type: "noul",
@@ -91,7 +113,10 @@ export async function classifyPaneWithJev(
     downUntil = now + COOLDOWN_MS; // outage/timeout: stop asking for a minute, heuristics stand
     return null;
   }
-  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
-  cache.set(text, verdict);
+  // Idle is never cached: a stable prompt screen must get fresh evidence each time.
+  if (verdict?.state !== "idle") {
+    if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
+    cache.set(text, verdict);
+  }
   return verdict;
 }

@@ -199,3 +199,45 @@ describe("readPaneLastActivity (herdr revision motion)", () => {
     expect(await t.readPaneLastActivity("dev-impl@r")).toBeTypeOf("number");
   });
 });
+
+describe("per-pane input transaction", () => {
+  it("two overlapping multi-chunk sends never interleave or share an Enter", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fakeHerdr();
+      const t = new HerdrSeatAdapter({ exec: h.exec });
+      const send = async (body: string) => {
+        await t.sendText("dev-impl@r", body);
+        await t.sendKeys("dev-impl@r", ["Enter"]);
+      };
+      const a = send(`A${"a".repeat(9000)}\nend`);
+      const b = send(`B${"b".repeat(9000)}\nend`);
+      await vi.advanceTimersByTimeAsync(3_000);
+      await Promise.all([a, b]);
+      const input = h.calls
+        .filter((c) => c[0] === "pane" && (c[1] === "send-text" || (c[1] === "send-keys" && c[3] === "enter")))
+        .map((c) => (c[1] === "send-keys" ? "ENTER" : c[3]!.includes("B") || c[3]!.startsWith("b") ? "B" : "A"));
+      expect(input).toEqual(["A", "A", "ENTER", "B", "B", "ENTER"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an unsubmitted paste releases the pane after 10s", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fakeHerdr();
+      const t = new HerdrSeatAdapter({ exec: h.exec });
+      await t.sendText("dev-impl@r", "never submitted");
+      let second = false;
+      const p = t.sendText("dev-impl@r", "next").then(() => (second = true));
+      await vi.advanceTimersByTimeAsync(9_000);
+      expect(second).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await p;
+      expect(second).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

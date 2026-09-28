@@ -300,7 +300,9 @@ export async function probeSessionActivity(input: {
     const classification = classifyPaneActivity(paneContent ?? "");
     if (classification.state === "unknown" && jevPaneEnabled()) {
       const jev = await classifyPaneWithJev(paneContent ?? "");
-      if (jev) {
+      // This probe gates sends: only Jev's fail-safe verdicts count here. Its idle is
+      // probabilistic and never authorises typing into a pane.
+      if (jev && jev.state !== "idle") {
         return {
           state: jev.state,
           reason: `jev_${jev.state}`,

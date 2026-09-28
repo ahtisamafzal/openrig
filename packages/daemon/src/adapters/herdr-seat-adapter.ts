@@ -31,6 +31,7 @@ const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
 const PASTE_SETTLE_MS = 600;
 const SUBMIT_CHECK_MS = 2500;
 const SUBMIT_RETRIES = 6; // ~15s: covers Codex startup hooks + MCP boot
+const INPUT_HOLD_MS = 10_000; // max time a pasted-but-unsubmitted input holds the pane
 
 /**
  * A Codex paste placeholder still sitting in the COMPOSER. The composer is the
@@ -182,6 +183,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly lastPasteAt = new Map<string, number>();
   /** Bumped on every paste; a background submit-recheck stops once its paste is superseded. */
   private readonly pasteGeneration = new Map<string, number>();
+  private readonly inputLock = new Map<string, { done: Promise<void>; release: () => void }>();
   private preflightResult: Promise<TmuxResult> | null = null;
 
   constructor(opts: HerdrSeatAdapterOptions = {}) {
@@ -404,8 +406,12 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   // ---- input ----------------------------------------------------------------
 
   override async sendText(target: string, text: string): Promise<TmuxResult> {
+    let id: string | undefined;
     try {
-      const id = await this.paneId(target);
+      id = await this.paneId(target);
+      // One input transaction per pane: this text plus its submit. A concurrent send
+      // waits here, so two messages never interleave chunks or share an Enter.
+      await this.beginInput(id);
       // herdr types a newline as Enter. Bracketed paste (what tmux `-p` does)
       // keeps multi-line text in the input until the caller's explicit submit.
       const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
@@ -417,8 +423,26 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       }
       return { ok: true };
     } catch (err) {
+      if (id) this.endInput(id);
       return this.fail(err);
     }
+  }
+
+  private async beginInput(id: string): Promise<void> {
+    while (this.inputLock.has(id)) await this.inputLock.get(id)!.done;
+    let resolve!: () => void;
+    const done = new Promise<void>((r) => (resolve = r));
+    // A caller that never submits must not wedge the pane forever.
+    const timer = setTimeout(() => this.endInput(id), INPUT_HOLD_MS);
+    timer.unref?.();
+    this.inputLock.set(id, { done, release: () => { clearTimeout(timer); resolve(); } });
+  }
+
+  private endInput(id: string): void {
+    const lock = this.inputLock.get(id);
+    if (!lock) return;
+    this.inputLock.delete(id);
+    lock.release();
   }
 
   /**
@@ -451,6 +475,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         else await this.text(["pane", "send-text", id, mapped.text]);
         // Background: the recheck can take ~15s, far past the CLI's 5s send timeout.
         if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) void this.confirmSubmitted(id, this.pasteGeneration.get(id) ?? 0).catch(() => {});
+        // Submit or cancel closes the input transaction opened by sendText.
+        if ("key" in mapped && (mapped.key === "enter" || mapped.key === "ctrl+c")) this.endInput(id);
       }
       return { ok: true };
     } catch (err) {

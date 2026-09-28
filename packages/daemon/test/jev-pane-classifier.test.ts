@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { classifyPaneWithJev, paneVerdict, resetJevPaneClassifier } from "../src/domain/jev-pane-classifier.js";
+import { classifyPaneWithJev, jevPaneEnabled, paneVerdict, redactSecrets, resetJevPaneClassifier } from "../src/domain/jev-pane-classifier.js";
 
-const env = { TYPESAFE_API_KEY: "test-key" } as NodeJS.ProcessEnv;
+const env = { TYPESAFE_API_KEY: "test-key", OPENRIG_JEV_PANE_CLASSIFICATION: "1" } as NodeJS.ProcessEnv;
 const answer = (asks: number, busy: number) =>
   new Response(JSON.stringify({ answers: { asks: { type: "noul", noul: asks }, busy: { type: "noul", noul: busy } } }), { status: 200 });
 function fakeFetch(...responses: Array<Response | Error>) {
@@ -19,8 +19,35 @@ function fakeFetch(...responses: Array<Response | Error>) {
 describe("classifyPaneWithJev (offline)", () => {
   beforeEach(() => resetJevPaneClassifier());
 
-  it("is off without a key", async () => {
-    expect(await classifyPaneWithJev("screen", { env: {}, fetch: fakeFetch().f })).toBeNull();
+  it("needs both the key and the dedicated pane-upload opt-in", async () => {
+    expect(jevPaneEnabled({})).toBe(false);
+    expect(jevPaneEnabled({ TYPESAFE_API_KEY: "k" })).toBe(false);
+    expect(jevPaneEnabled({ OPENRIG_JEV_PANE_CLASSIFICATION: "1" })).toBe(false);
+    expect(jevPaneEnabled(env)).toBe(true);
+    const none = fakeFetch();
+    expect(await classifyPaneWithJev("screen", { env: { TYPESAFE_API_KEY: "k" }, fetch: none.f })).toBeNull();
+    expect(none.calls()).toBe(0);
+  });
+
+  it("masks secrets before the screen leaves the machine", () => {
+    const out = redactSecrets([
+      "export OPENROUTER_API_KEY=sk-or-v1-abcdefghijklmnop",
+      "curl -H 'Authorization: Bearer abc.def.ghijklmnopqrstu'",
+      "token: ghp_ABCDEFGHIJKLMNOP1234",
+      "password=hunter2hunter2",
+      "key apikey_2214bcf76a67f010",
+      "plain text stays",
+    ].join("\n"));
+    for (const secret of ["sk-or-v1", "abc.def.ghijk", "ghp_ABC", "hunter2", "apikey_2214"]) expect(out).not.toContain(secret);
+    expect(out).toContain("plain text stays");
+    expect(out).toContain("password=[redacted]");
+  });
+
+  it("never caches idle (a stable prompt screen must be re-asked)", async () => {
+    const ff = fakeFetch(answer(0.05, 0.1), answer(0.05, 0.1));
+    await classifyPaneWithJev("quiet", { env, fetch: ff.f });
+    await classifyPaneWithJev("quiet", { env, fetch: ff.f });
+    expect(ff.calls()).toBe(2);
   });
 
   it("combines the two answers; needs_input beats busy; idle needs two confident no's", () => {
@@ -57,7 +84,10 @@ describe("classifyPaneWithJev (offline)", () => {
 // Live: real TypeSafe calls with the operator's key (skipped when TYPESAFE_API_KEY is unset).
 // Screens are real captures from the Windows trio smoke (2026-09-28).
 describe.skipIf(!process.env.TYPESAFE_API_KEY?.trim())("classifyPaneWithJev (live TypeSafe)", () => {
-  beforeEach(() => resetJevPaneClassifier());
+  beforeEach(() => {
+    resetJevPaneClassifier();
+    process.env.OPENRIG_JEV_PANE_CLASSIFICATION = "1";
+  });
 
   it("Codex approval prompt -> needs_input", async () => {
     const screen = [

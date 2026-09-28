@@ -3,8 +3,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
 import { classifyPaneWithJev, jevPaneEnabled, type JevPaneState } from "./jev-pane-classifier.js";
 
-const JEV_TO_PANE: Record<JevPaneState, PaneActivityClassification["state"]> = {
-  idle: "agent_idle", running: "agent_active", needs_input: "attention",
+const JEV_TO_PANE: Record<Exclude<JevPaneState, "idle">, PaneActivityClassification["state"]> = {
+  running: "agent_active", needs_input: "attention",
 };
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
@@ -86,9 +86,10 @@ export class SeatStructuralActivityService {
     }
     let c = classifyPaneActivity(content);
     if (c.state === "unknown" && jevPaneEnabled()) {
-      // Structure found no signal (herdr's Windows panes): ask Jev. Null keeps unknown.
+      // Structure found no signal (herdr's Windows panes): ask Jev. Only fail-safe verdicts
+      // (running / needs_input) count — this cache feeds idle-gated automation too.
       const jev = await classifyPaneWithJev(content);
-      if (jev) c = { state: JEV_TO_PANE[jev.state], reason: `jev_${jev.state}`, evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}` };
+      if (jev && jev.state !== "idle") c = { state: JEV_TO_PANE[jev.state], reason: `jev_${jev.state}`, evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}` };
     }
     const obs: StructuralObservation = {
       state: c.state,
