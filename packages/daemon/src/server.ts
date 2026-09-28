@@ -3,6 +3,7 @@ import type { HealthDiagnosisService } from "./domain/health-diagnosis.js";
 import type { HealthPolicyStore } from "./domain/health-policy.js";
 import type { HealthCheckpointSource } from "./domain/health-checkpoints.js";
 import { Hono } from "hono";
+import { isLoopbackRequest, remoteCallerGate } from "./middleware/auth-bearer-token.js";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -614,6 +615,13 @@ export function createApp(deps: AppDeps): Hono {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
 
+  // Remote-caller gate. Upstream treated a tailnet bind as its own auth boundary and
+  // gated only 3 route groups; every node on the tailnet could then drive seats
+  // (/api/transport), write files and tear rigs down. Callers on this host pass;
+  // anyone else needs the operator bearer (index.ts also refuses to bind beyond
+  // loopback without one).
+  app.use("*", remoteCallerGate(deps.missionControlBearerToken ?? null));
+
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
   // envelope on allowlisted GET reads; refuses non-GET / non-allowlisted
@@ -828,7 +836,9 @@ export function createApp(deps: AppDeps): Hono {
     }
 
     const indexHtml = fs.readFileSync(uiIndexPath, "utf-8");
-    const tokenScript = deps.terminalBearerToken
+    // Only a page served to this host gets the terminal token; a remote browser must
+    // enter it (an unauthenticated GET / used to hand it to anyone who could reach us).
+    const tokenScript = deps.terminalBearerToken && isLoopbackRequest(c)
       ? `<script>if(!window.localStorage.getItem("openrig.terminalBearerToken"))window.localStorage.setItem("openrig.terminalBearerToken",${JSON.stringify(deps.terminalBearerToken)})</script>`
       : "";
     const injected = tokenScript ? indexHtml.replace("</head>", `${tokenScript}</head>`) : indexHtml;

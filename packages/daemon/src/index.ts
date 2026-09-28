@@ -294,7 +294,13 @@ export async function startServer(port?: number) {
     bindHosts = [explicitHost];
   } else {
     // Default path — the plan already computed loopback + tailscale-when-active.
-    bindHosts = bindPlan.hosts;
+    // A tailnet is not an auth boundary for this API (any tailnet node could drive
+    // seats): without an operator bearer, stay on loopback.
+    bindHosts = bearerToken ? bindPlan.hosts : bindPlan.hosts.filter((h) => isLoopbackBind(h));
+    if (bindHosts.length < bindPlan.hosts.length) {
+      console.warn(`[bind] not binding ${bindPlan.hosts.filter((h) => !bindHosts.includes(h)).join(", ")}: set OPENRIG_AUTH_BEARER_TOKEN to expose the daemon beyond this host`);
+    }
+    if (bindHosts.length === 0) bindHosts = ["127.0.0.1"];
   }
 
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({

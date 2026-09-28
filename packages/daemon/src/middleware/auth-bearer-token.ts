@@ -262,3 +262,32 @@ export async function assertBindAuthInvariant(opts: {
       `or (c) set OPENRIG_AUTH_BEARER_TOKEN to a non-empty value before starting the daemon.`,
   );
 }
+
+/**
+ * True when the HTTP caller is on this host. Reads the node-server socket
+ * (`c.env.incoming`); a request with no socket (in-process `app.request` from
+ * tests or internal callers) is local by construction.
+ */
+export function isLoopbackRequest(c: { env?: unknown }): boolean {
+  const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
+    ?.incoming?.socket?.remoteAddress;
+  if (address === undefined) return true;
+  const a = address.toLowerCase().replace(/^::ffff:/, "");
+  return a === "::1" || a.startsWith("127.");
+}
+
+/**
+ * Callers on this host pass (the single-host model: CLI, TUI, seats). Any other
+ * caller needs the operator bearer for everything except /healthz, and is refused
+ * outright when no bearer is configured.
+ */
+export function remoteCallerGate(expectedToken: string | null): MiddlewareHandler {
+  const bearer = authBearerTokenMiddleware({ expectedToken });
+  return async (c, next) => {
+    if (c.req.path === "/healthz" || isLoopbackRequest(c)) return next();
+    if (!expectedToken) {
+      return c.json(unauthorizedBody("remote access requires OPENRIG_AUTH_BEARER_TOKEN on the daemon"), 401);
+    }
+    return bearer(c, next);
+  };
+}
