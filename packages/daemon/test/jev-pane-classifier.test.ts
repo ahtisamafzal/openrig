@@ -65,6 +65,7 @@ describe("classifyPaneWithJev (offline)", () => {
     for (const screen of [
       ["-----BEGIN OPENSSH PRIVATE KEY-----", ...body, "-----END OPENSSH PRIVATE KEY-----", "$"].join("\n"),
       [...body, "-----END OPENSSH PRIVATE KEY-----", "$"].join("\n"), // BEGIN scrolled off
+      [...body, "QUJDREVGR0hJSktMTU5Pshort==", "-----END RSA PRIVATE KEY-----", "$"].join("\n"), // short final line
     ]) {
       resetJevPaneClassifier();
       let sent = "";

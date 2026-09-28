@@ -43,7 +43,9 @@ export function jevPaneEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 // leave OPENRIG_JEV_PANE_CLASSIFICATION unset. Extend as new shapes show up.
 const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-  // Key/cert body lines whose BEGIN marker scrolled off the capture: a whole line of base64.
+  // BEGIN scrolled off: every base64 line (any length) directly above the END marker.
+  /(?:^[ \t]*[A-Za-z0-9+/]+={0,2}[ \t]*\r?\n)+[ \t]*-----END [A-Z ]*PRIVATE KEY-----/gm,
+  // Key/cert body lines with neither marker in view: a whole line of base64.
   /^\s*[A-Za-z0-9+/]{40,}={0,2}\s*$/gm,
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, // OpenAI / OpenRouter / Stripe-style keys
   /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g,
