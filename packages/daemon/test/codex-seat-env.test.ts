@@ -88,3 +88,28 @@ describe("withMsysParents trusts a link only when ps STIME still matches (pid re
     expect(stimeMatches("Sep 27", new Date(2026, 8, 29, 8, 0, 0), now)).toBe(false); // reused today
   });
 });
+
+describe("withMsysParents: pid reused WHILE ps runs", () => {
+  it("a replacement created after ps started is not trusted; keepUnverified flags it instead", async () => {
+    const { withMsysParents } = await import("../src/domain/msys-parents.js");
+    const now = new Date();
+    const hhmmss = (d: Date) => [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+    const early = new Date(now.getTime() - 60_000);
+    const ps = [
+      "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND",
+      `      10       1      10        200  cons0     1 ${hhmmss(early)} /usr/bin/bash`,
+      `      11      10      11        300  cons0     1 ${hhmmss(early)} /c/npm/claude`,
+    ].join("\n");
+    let replacementStart = new Date(0);
+    const readPs = async () => {
+      replacementStart = new Date(Date.now() + 50); // original 300 exits, pid reused mid-ps
+      await new Promise((r) => setTimeout(r, 100));
+      return ps;
+    };
+    const snapshot = async () => [{ pid: 200, ppid: 1, t: early }, { pid: 300, ppid: 999, t: replacementStart }];
+    const strict = await withMsysParents(snapshot, (r) => r.t, readPs);
+    expect(strict.find((r) => r.pid === 300)).toMatchObject({ ppid: 999 });
+    const kept = await withMsysParents(snapshot, (r) => r.t, readPs, { keepUnverified: true });
+    expect(kept.find((r) => r.pid === 300)).toMatchObject({ ppid: 200, unverified: true });
+  });
+});

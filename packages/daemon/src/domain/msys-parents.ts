@@ -51,11 +51,11 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /**
  * Is `started` (Windows creation time) the process MSYS ps saw? An MSYS process keeps its
  * STIME across exec, and the exec'd native program (claude.exe under the sh shim) is created
- * a moment later, so: STIME <= started <= psAt (the process existed when ps ran). A pid
- * reused after ps ran starts after psAt and fails. STIME is "HH:MM:SS" for today, else "Mon D".
+ * a moment later, so: STIME <= started <= psAt (when ps was started: everything ps lists
+ * existed by then). A pid reused later starts after psAt and fails. STIME is "HH:MM:SS" for today, else "Mon D".
  */
 export function stimeMatches(stime: string, started: Date, psAt = new Date()): boolean {
-  if (Number.isNaN(started.getTime()) || started.getTime() > psAt.getTime() + 999) return false;
+  if (Number.isNaN(started.getTime()) || started.getTime() > psAt.getTime()) return false;
   const time = /^(\d\d):(\d\d):(\d\d)$/.exec(stime);
   if (time) {
     const floor = new Date(psAt.getFullYear(), psAt.getMonth(), psAt.getDate(), +time[1]!, +time[2]!, +time[3]!);
@@ -67,22 +67,28 @@ export function stimeMatches(stime: string, started: Date, psAt = new Date()): b
 
 /**
  * Re-parent Windows rows from MSYS ps. ps runs FIRST, then the Windows snapshot; a link is
- * applied only when the child and the parent are both still the processes ps saw
- * (stimeMatches). Windows reuses pids, and a pid reused after ps ran starts later, so it
- * fails the match.
+ * VERIFIED only when the child and the parent are both still the processes ps saw:
+ * STIME <= started <= the moment ps was STARTED. Every process ps listed already existed
+ * before ps began, and a pid reused afterwards (even while ps was still running) starts
+ * later, so it fails.
+ *
+ * `keepUnverified`: an MSYS link that fails verification is still applied, flagged
+ * `unverified`. Dropping it would make a live harness vanish from under its seat shell,
+ * and "nothing runs there" is the dangerous direction (a handover would type into the
+ * pane). Callers that need identity (lineage proof, kill targets) must not trust flagged rows.
  * No Git Bash (or ps fails) = the Windows snapshot unchanged.
  */
-export async function withMsysParents<T extends { pid: number; ppid: number }>(
+export async function withMsysParents<T extends { pid: number; ppid: number; unverified?: boolean }>(
   snapshot: () => Promise<T[]>,
   startedOf: (row: T) => Date | undefined,
   readPs: () => Promise<string> = async () =>
     (await execFileAsync(msysPsPath(), ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout,
+  opts: { keepUnverified?: boolean } = {},
 ): Promise<T[]> {
   let msys: Map<number, MsysProc> | null = null;
-  let psAt = new Date();
+  const psStart = new Date();
   try {
     msys = parseMsysPs(await readPs());
-    psAt = new Date();
   } catch {
     msys = null;
   }
@@ -93,10 +99,12 @@ export async function withMsysParents<T extends { pid: number; ppid: number }>(
     const row = byPid.get(pid);
     const seen = msys!.get(pid);
     const started = row ? startedOf(row) : undefined;
-    return Boolean(row && seen && started && stimeMatches(seen.stime, started, psAt));
+    return Boolean(row && seen && started && stimeMatches(seen.stime, started, psStart));
   };
   return rows.map((r) => {
     const parent = msys!.get(r.pid)?.parentWinpid;
-    return parent && same(r.pid) && same(parent) ? { ...r, ppid: parent } : r;
+    if (!parent) return r;
+    if (same(r.pid) && same(parent)) return { ...r, ppid: parent };
+    return opts.keepUnverified && byPid.has(parent) ? { ...r, ppid: parent, unverified: true } : r;
   });
 }

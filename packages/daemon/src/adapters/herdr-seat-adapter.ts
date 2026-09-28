@@ -72,7 +72,7 @@ export interface HerdrSeatAdapterOptions {
 }
 
 /** `started` (Windows creation time) pins a pid's identity: Windows reuses pids. */
-export interface ProcessRow { pid: number; ppid: number; name: string; started?: string }
+export interface ProcessRow { pid: number; ppid: number; name: string; started?: string; unverified?: boolean }
 
 async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
@@ -114,7 +114,7 @@ export function handleBoundKillScript(pid: number, started: string): string {
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
 async function defaultProcessTable(msysPs: string): Promise<ProcessRow[]> {
   return withMsysParents(cimProcessTable, (r) => (r.started ? new Date(r.started) : undefined), async () =>
-    (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout);
+    (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout, { keepUnverified: true });
 }
 
 interface HerdrPaneInfo {
@@ -706,6 +706,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       const under = kids(shell.pid);
       if (under.length === 0) return null;
       if (under.length > 1) return "ambiguous";
+      // Something runs here but its identity could not be verified: never idle, never killed.
+      if (under[0]!.unverified) return "ambiguous";
       if (!isShell(under[0]!)) return under[0]!;
       shell = under[0]!;
     }

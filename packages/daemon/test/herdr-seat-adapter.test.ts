@@ -455,3 +455,22 @@ describe("KILL is handle-bound (Windows reuses pids)", () => {
     expect(() => handleBoundKillScript(4242, "x'; Remove-Item C:\ -Recurse; '")).toThrow();
   });
 });
+
+describe("an unverified MSYS link under the seat shell", () => {
+  it("is 'something runs, identity unknown': pane not free, KILL refused", async () => {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) =>
+      args[0] === "pane" && args[1] === "process-info"
+        ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+        : h.exec(args);
+    const processTable = async () => [
+      { pid: 100, ppid: 1, name: "powershell.exe" },
+      { pid: 200, ppid: 100, name: "bash.exe" },
+      { pid: 300, ppid: 200, name: "claude.exe", started: "2026-09-29T00:00:00.000000", unverified: true },
+    ];
+    const t = new HerdrSeatAdapter({ exec, processTable });
+    expect(await t.isPaneDead("dev-impl@r")).toBe(false);
+    expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+    expect(await t.respawnPane("dev-impl@r", "codex")).toMatchObject({ ok: false, code: "pane_busy" });
+  });
+});
