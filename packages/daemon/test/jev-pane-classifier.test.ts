@@ -60,6 +60,23 @@ describe("classifyPaneWithJev (offline)", () => {
     expect(out).toContain("Working (3s • esc to interrupt)");
   });
 
+  it("a long private key never reaches the request body, even when its header is cut off", async () => {
+    const body = Array.from({ length: 12 }, (_, i) => `${"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo"}${String(i).padStart(10, "0")}xyz`);
+    for (const screen of [
+      ["-----BEGIN OPENSSH PRIVATE KEY-----", ...body, "-----END OPENSSH PRIVATE KEY-----", "$"].join("\n"),
+      [...body, "-----END OPENSSH PRIVATE KEY-----", "$"].join("\n"), // BEGIN scrolled off
+    ]) {
+      resetJevPaneClassifier();
+      let sent = "";
+      const f = (async (_u: string, init: RequestInit) => {
+        sent = String(init.body);
+        return answer(0.05, 0.9);
+      }) as unknown as typeof fetch;
+      await classifyPaneWithJev(screen, { env, fetch: f });
+      expect(sent).not.toContain("QUJDREVGR0hJSktMTU5P");
+    }
+  });
+
   it("never caches idle (a stable prompt screen must be re-asked)", async () => {
     const ff = fakeFetch(answer(0.05, 0.1), answer(0.05, 0.1));
     await classifyPaneWithJev("quiet", { env, fetch: ff.f });

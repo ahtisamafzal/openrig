@@ -43,6 +43,8 @@ export function jevPaneEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 // leave OPENRIG_JEV_PANE_CLASSIFICATION unset. Extend as new shapes show up.
 const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+  // Key/cert body lines whose BEGIN marker scrolled off the capture: a whole line of base64.
+  /^\s*[A-Za-z0-9+/]{40,}={0,2}\s*$/gm,
   /\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, // OpenAI / OpenRouter / Stripe-style keys
   /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{10,}/g,
   /\bnpm_[A-Za-z0-9]{20,}/g,
@@ -91,7 +93,8 @@ export async function classifyPaneWithJev(
       body: JSON.stringify({
         model: env.TYPESAFE_DEFAULT_MODEL?.trim() || "jev-latest",
         // The agent's current state lives at the bottom; older lines only add noise.
-        state: redactSecrets(text.split("\n").filter((l) => l.trim()).slice(-8).join("\n")),
+        // Mask the WHOLE capture first so a multi-line secret cut by the slice still matches.
+        state: redactSecrets(text).split("\n").filter((l) => l.trim()).slice(-8).join("\n"),
         questions: {
           busy: {
             type: "noul",
