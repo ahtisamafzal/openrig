@@ -3,6 +3,7 @@ import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+const HANDOVER_TIMEOUT_MS = 300_000;
 
 export type SeatDeps = StatusDeps;
 
@@ -617,7 +618,9 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
     reason: opts.reason,
     operator: opts.operator,
     dryRun: opts.dryRun === true,
-  });
+  // A real handover stops the retiree (graceful window + forced fallback), launches and verifies
+  // the successor: minutes, not the client's 5s default (which reported every run "UNKNOWN").
+  }, opts.dryRun === true ? undefined : { timeoutMs: HANDOVER_TIMEOUT_MS });
 
   if (opts.json) {
     console.log(JSON.stringify(res.data, null, 2));

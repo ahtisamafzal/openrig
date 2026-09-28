@@ -5,7 +5,7 @@ import os from "node:os";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
-import { codexPostureArg } from "./yolo-mode.js";
+import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -333,6 +333,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const postureArg = codexPostureArg(profileArg, process.env, binding.launchPosture);
     const appliedLaunch = observeCodexSandbox(postureArg);
+    const launchArgs = postureArg + codexSeatEnvArg();
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque
@@ -376,7 +377,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${daemonArg}${postureArg}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const cmd = `codex${daemonArg}${launchArgs}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -400,8 +401,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, postureArg, daemonOptOut)
-      : `codex${daemonArg}${postureArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, launchArgs, daemonOptOut)
+      : `codex${daemonArg}${launchArgs} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
     if (!textResult.ok) {

@@ -11,7 +11,12 @@
 // the right server.
 
 import { execFile, spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import nodePath from "node:path";
 import { promisify } from "node:util";
+import { shellQuote } from "./shell-quote.js";
+import { isShellForeground } from "../domain/shell-classifier.js";
 import {
   TmuxAdapter,
   type SessionProbe,
@@ -30,6 +35,8 @@ const WORKSPACE_PREFIX = "openrig:";
 const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
 const PASTE_SETTLE_MS = 600;
 const SUBMIT_CHECK_MS = 2500;
+const ENV_FILE_TTL_MS = 10_000;
+const INTERRUPT_GAP_MS = 300; // two Ctrl-Cs this far apart read as "quit" to Claude/Codex/Pi
 const SUBMIT_RETRIES = 6; // ~15s: covers Codex startup hooks + MCP boot
 const INPUT_HOLD_MS = 30_000; // max time a pasted-but-unsubmitted input holds the pane
 
@@ -58,6 +65,21 @@ export interface HerdrSeatAdapterOptions {
   exec?: HerdrExecFn;
   /** Injected for tests; opens a visible window attached to the session. */
   openWindow?: (session: string) => void;
+  /** Injected for tests; the Windows process table as pid/ppid/name rows. */
+  processTable?: () => Promise<ProcessRow[]>;
+}
+
+export interface ProcessRow { pid: number; ppid: number; name: string }
+
+async function defaultProcessTable(): Promise<ProcessRow[]> {
+  const { stdout } = await execFileAsync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name)\" }",
+  ], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  return stdout.split(/\r?\n/).flatMap((line) => {
+    const [pid, ppid, name] = line.split(",");
+    return pid && ppid && name ? [{ pid: Number(pid), ppid: Number(ppid), name }] : [];
+  });
 }
 
 interface HerdrPaneInfo {
@@ -156,14 +178,21 @@ export function toHerdrKey(key: string): { key: string } | { text: string } | nu
  * PATH is `C:\a;D:\b`, which Git Bash cannot search; rewrite it to `/c/a:/d/b`.
  */
 export function toPosixPathPrefix(command: string): string {
-  return command.replace(/^env PATH='([^']*;[^']*)' /, (_m, winPath: string) => {
-    const posix = winPath
-      .split(";")
-      .filter(Boolean)
-      .map((p) => p.replace(/^([A-Za-z]):[\\/]?/, (_d, drive: string) => `/${drive.toLowerCase()}/`).replace(/\\/g, "/"))
-      .join(":");
-    return `env PATH='${posix}' `;
-  });
+  return command.replace(/^env PATH='([^']*;[^']*)' /, (_m, winPath: string) => `env PATH='${toPosixPathList(winPath)}' `);
+}
+
+const toPosixPath = (p: string) => p.replace(/^([A-Za-z]):[\\/]?/, (_d, drive: string) => `/${drive.toLowerCase()}/`).replace(/\\/g, "/");
+const toPosixPathList = (winPath: string) => winPath.split(";").filter(Boolean).map(toPosixPath).join(":");
+
+/**
+ * A value as Git Bash would have converted it at startup. Exported inside an
+ * already-running bash, a Windows PATH (`C:\a;D:\b`) hides every command and a
+ * Windows HOME breaks `~`; other values (CODEX_HOME, …) stay native for Windows tools.
+ */
+export function msysEnvValue(name: string, value: string): string {
+  if (name === "PATH" && value.includes(";")) return toPosixPathList(value);
+  if (name === "HOME" && /^[A-Za-z]:[\\/]/.test(value)) return toPosixPath(value);
+  return value;
 }
 
 export class HerdrSeatAdapter extends TmuxAdapter {
@@ -171,6 +200,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly paneShell: string;
   private readonly herdr: HerdrExecFn;
   private readonly openWindow: (session: string) => void;
+  private readonly processTable: () => Promise<ProcessRow[]>;
   // ponytail: in-memory only, deliberately. No daemon code reads session/server
   // options back (claim writes @rigged_*, teardown clears them), and hasSessionEnv
   // feeds one diagnostic that already reports null = unknown after a restart. Persist
@@ -194,6 +224,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     this.paneShell = opts.paneShell ?? process.env.OPENRIG_PANE_SHELL ?? "C:\\Program Files\\Git\\bin\\bash.exe";
     this.herdr = opts.exec ?? defaultExec(this.session);
     this.openWindow = opts.openWindow ?? defaultOpenWindow;
+    this.processTable = opts.processTable ?? defaultProcessTable;
   }
 
   // ---- herdr plumbing -------------------------------------------------------
@@ -383,8 +414,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       }
       await this.call(["pane", "rename", paneId, name]);
       // herdr panes start in PowerShell; seats expect a POSIX shell.
-      await this.text(["pane", "run", paneId, `& "${this.paneShell}"`]);
-      await this.text(["pane", "wait-output", paneId, "--regex", "\\$\\s*$", "--timeout", "15000"]);
+      await this.startSeatShell(paneId);
       this.sessionEnvKeys.set(name, new Set(Object.keys(env ?? {})));
       return { ok: true };
     } catch (err) {
@@ -579,44 +609,88 @@ export class HerdrSeatAdapter extends TmuxAdapter {
    * `bash` at the seat prompt and the harness (`claude`, `node`, ...) when one runs.
    */
   override async getPaneCommand(paneId: string): Promise<string | null> {
+    const chain = await this.paneChain(paneId);
+    if (!chain) return null;
+    const name = chain.at(-1)?.name || (await this.processInfo(paneId))?.foreground_processes?.[0]?.name;
+    return name ? name.replace(/\.exe$/i, "") : null;
+  }
+
+  /** Root (PowerShell) down to the deepest descendant, ignoring console hosts. null = no pane/pid. */
+  private async paneChain(paneId: string): Promise<ProcessRow[] | null> {
     const root = await this.getPanePid(paneId);
     if (root == null) return null;
     try {
-      const { stdout } = await execFileAsync("powershell", [
-        "-NoProfile", "-Command",
-        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name)\" }",
-      ], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
-      const children = new Map<number, { pid: number; name: string }[]>();
-      for (const line of stdout.split(/\r?\n/)) {
-        const [pid, ppid, name] = line.split(",");
-        if (!pid || !ppid || !name) continue;
-        const list = children.get(Number(ppid)) ?? [];
-        list.push({ pid: Number(pid), name });
-        children.set(Number(ppid), list);
-      }
+      const rows = await this.processTable();
+      const children = new Map<number, ProcessRow[]>();
+      for (const r of rows) children.set(r.ppid, [...(children.get(r.ppid) ?? []), r]);
       const ignore = /^(conhost|OpenConsole)\.exe$/i;
-      let current = { pid: root, name: "" };
+      const chain: ProcessRow[] = [rows.find((r) => r.pid === root) ?? { pid: root, ppid: 0, name: "" }];
       for (let depth = 0; depth < 10; depth++) {
-        const next = (children.get(current.pid) ?? []).filter((c) => !ignore.test(c.name)).at(-1);
+        const next = (children.get(chain.at(-1)!.pid) ?? []).filter((c) => !ignore.test(c.name)).at(-1);
         if (!next) break;
-        current = next;
+        chain.push(next);
       }
-      const name = current.name || (await this.processInfo(paneId))?.foreground_processes?.[0]?.name;
-      return name ? name.replace(/\.exe$/i, "") : null;
+      return chain;
     } catch {
       return null;
     }
   }
 
-  override async isPaneDead(paneId: string): Promise<boolean> {
-    return (await this.resolve(paneId).catch(() => "unknown")) === null;
+  /**
+   * The seat's harness: the process running under the pane's POSIX shell. Git Bash's
+   * bin\bash.exe launcher starts usr\bin\bash.exe, so the chain is
+   * PowerShell -> bash -> bash -> harness: skip the whole run of shells.
+   * null = the shell is back at its prompt; "no_shell" = the seat shell itself is gone.
+   */
+  private async harness(paneId: string): Promise<ProcessRow | null | "no_pane" | "no_shell"> {
+    const chain = await this.paneChain(paneId);
+    if (!chain) return "no_pane";
+    const shellBase = nodePath.win32.basename(this.paneShell).toLowerCase();
+    const isShell = (p: ProcessRow) => p.name.toLowerCase() === shellBase;
+    let at = chain.findIndex((p, i) => i > 0 && isShell(p));
+    if (at < 0) return "no_shell";
+    while (chain[at + 1] && isShell(chain[at + 1]!)) at++;
+    return chain[at + 1] ?? null;
   }
 
+  /**
+   * Start the seat's POSIX shell in the pane (herdr panes open in PowerShell). Typed, not
+   * `pane run`: after a killed bash leaves bracketed-paste mode stale, PowerShell reads a
+   * pasted `& "…"` as literal `[…[` garbage. Ctrl-C first drops any half-typed line.
+   */
+  private async startSeatShell(paneId: string): Promise<void> {
+    await this.text(["pane", "send-keys", paneId, "ctrl+c"]);
+    await this.text(["pane", "send-text", paneId, `& "${this.paneShell}"`]);
+    await this.text(["pane", "send-keys", paneId, "enter"]);
+    await this.text(["pane", "wait-output", paneId, "--regex", "\\$\\s*$", "--timeout", "15000"]);
+  }
+
+  /** Handover: the retiree has exited when its harness is gone and the seat shell is back at its
+   *  prompt. herdr panes outlive the harness (the shell keeps them, with their scrollback). */
+  override async isPaneDead(paneId: string): Promise<boolean> {
+    if ((await this.resolve(paneId).catch(() => "unknown")) === null) return true;
+    const h = await this.harness(paneId);
+    return h === null || h === "no_pane" || h === "no_shell";
+  }
+
+  /**
+   * Handover: stop the HARNESS, never the pane shell (killing the pane's root closes the pane
+   * and its scrollback). TERM = Ctrl-C twice (Claude, Codex and Pi exit on a double interrupt
+   * and keep their session); KILL = force-kill the harness tree.
+   */
   override async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
-    const pid = await this.getPanePid(paneId);
-    if (pid == null) return { ok: false, code: "session_not_found", message: `no pid for ${paneId}` };
+    const h = await this.harness(paneId);
+    if (h === "no_pane") return { ok: false, code: "session_not_found", message: `no pid for ${paneId}` };
+    if (h === null || h === "no_shell") return { ok: true }; // nothing left running under the seat shell
     try {
-      await execFileAsync("taskkill", ["/PID", String(pid), "/T", ...(signal === "KILL" ? ["/F"] : [])], { windowsHide: true });
+      if (signal === "TERM") {
+        const id = await this.paneId(paneId);
+        await this.text(["pane", "send-keys", id, "ctrl+c"]);
+        await new Promise((r) => setTimeout(r, INTERRUPT_GAP_MS));
+        await this.text(["pane", "send-keys", id, "ctrl+c"]);
+      } else {
+        await execFileAsync("taskkill", ["/PID", String(h.pid), "/T", "/F"], { windowsHide: true });
+      }
       return { ok: true };
     } catch (err) {
       return this.fail(err);
@@ -679,12 +753,57 @@ export class HerdrSeatAdapter extends TmuxAdapter {
     return { ok: true };
   }
 
-  override async respawnPane(): Promise<TmuxResult> {
-    return { ok: false, code: "unsupported", message: "respawn-pane is not available on herdr seats" };
+  /**
+   * Handover respawn. herdr has no respawn-pane, but it does not need one: the pane's shell
+   * survives the retiree (see isPaneDead), so "respawn" = set cwd/env in that shell and, for a
+   * non-shell command, start it there. Scrollback is untouched. Refuses while a harness still runs.
+   */
+  override async respawnPane(
+    paneTarget: string,
+    command?: string,
+    opts?: { cwd?: string; env?: Record<string, string> },
+  ): Promise<TmuxResult> {
+    const h = await this.harness(paneTarget);
+    if (h === "no_pane") return { ok: false, code: "session_not_found", message: `no herdr seat for ${paneTarget}` };
+    if (h !== null && h !== "no_shell") return { ok: false, code: "pane_busy", message: `respawn refused: ${h.name} still runs in ${paneTarget}` };
+    let envFile: string | null = null;
+    try {
+      if (h === "no_shell") await this.startSeatShell(await this.paneId(paneTarget));
+      const steps: string[] = [];
+      // Env values (tokens, keys) must never be typed: they would sit in the pane's
+      // scrollback and transcripts. Write them to a private temp file the shell sources
+      // and deletes; only its path is typed.
+      const env = Object.entries(opts?.env ?? {});
+      if (env.length > 0) {
+        envFile = nodePath.join(await mkdtemp(nodePath.join(os.tmpdir(), "openrig-seat-env-")), "env.sh");
+        await writeFile(envFile, env.map(([k, v]) => `export ${k}=${shellQuote(msysEnvValue(k, v))}\n`).join(""), { mode: 0o600 });
+        const posix = envFile.replace(/\\/g, "/");
+        steps.push(`. ${shellQuote(posix)} && rm -rf ${shellQuote(nodePath.dirname(envFile).replace(/\\/g, "/"))}`);
+      }
+      if (opts?.cwd) steps.push(`cd ${shellQuote(opts.cwd)}`);
+      const shellOnly = !command || isShellForeground(nodePath.win32.basename(command).replace(/\.exe$/i, ""), this.paneShell);
+      if (!shellOnly) steps.push(command!);
+      if (steps.length === 0) return { ok: true };
+      const sent = await this.sendShellCommand(paneTarget, steps.join(" && "));
+      if (sent.ok && env.length > 0) {
+        const session = (await this.resolve(paneTarget).catch(() => null))?.label;
+        if (session) this.sessionEnvKeys.set(session, new Set([...(this.sessionEnvKeys.get(session) ?? []), ...env.map(([k]) => k)]));
+      }
+      return sent;
+    } catch (err) {
+      return this.fail(err);
+    } finally {
+      // Backstop: the shell removes the file on source; never leave it longer than a few seconds.
+      if (envFile) {
+        const dir = nodePath.dirname(envFile);
+        setTimeout(() => void rm(dir, { recursive: true, force: true }), ENV_FILE_TTL_MS).unref?.();
+      }
+    }
   }
 
+  /** The seat shell already keeps the pane after the harness exits; nothing to set. */
   override async setRemainOnExit(): Promise<TmuxResult> {
-    return { ok: false, code: "unsupported", message: "remain-on-exit is not available on herdr seats" };
+    return { ok: true };
   }
 
   override async listClients(): Promise<TmuxClient[]> {

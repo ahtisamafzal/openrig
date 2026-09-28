@@ -61,6 +61,26 @@ export function codexPostureArg(
   return profileArg ? profileArg : " -s workspace-write";
 }
 
+/** Seat identity/routing vars every `rig` call inside a seat needs. */
+export const CODEX_SEAT_ENV_VARS = [
+  "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_PORT",
+] as const;
+
+/**
+ * Codex hands its tool commands an env filtered by the operator's
+ * `shell_environment_policy` (e.g. `inherit = "core"`), which strips OPENRIG_*
+ * so `rig` inside the seat runs as an unmanaged caller. Re-inject the seat's
+ * own values through the policy's `set` table. The values expand in the seat
+ * shell at launch (they are already in the pane env), so no identity is
+ * synthesised here (NodeLauncher always sets all six). Opt-in via
+ * OPENRIG_CODEX_SEAT_ENV=1, like OPENRIG_SEAT_STRICT_MCP; off = byte-identical launch.
+ */
+export function codexSeatEnvArg(env: NodeJS.ProcessEnv = process.env): string {
+  const on = env.OPENRIG_CODEX_SEAT_ENV;
+  if (on !== "1" && on !== "true") return "";
+  return CODEX_SEAT_ENV_VARS.map((v) => ` -c "shell_environment_policy.set.${v}=\\"$${v}\\""`).join("");
+}
+
 /** Pi RESOURCE TRUST (Pi's --approve/--no-approve govern resource trust, NOT a permission policy):
  *  YOLO forces `approve`; otherwise the configured posture (default `no-approve`). */
 export function piTrust(

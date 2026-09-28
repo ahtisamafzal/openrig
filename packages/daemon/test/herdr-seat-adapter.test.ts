@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { HerdrSeatAdapter, toHerdrKey, toPosixPathPrefix } from "../src/adapters/herdr-seat-adapter.js";
 
 const ok = (result: unknown) => JSON.stringify({ id: "cli", result });
@@ -99,7 +100,7 @@ describe("HerdrSeatAdapter", () => {
 
   it("fails loudly instead of running tmux for unmapped calls", async () => {
     const t = new HerdrSeatAdapter({ exec: fakeHerdr().exec });
-    expect(await t.respawnPane("w2:p1")).toMatchObject({ ok: false, code: "unsupported" });
+    expect(await t.switchClient()).toMatchObject({ ok: false, code: "unsupported" });
   });
 
   it("refuses to start seats on a herdr older than the verified envelopes", async () => {
@@ -263,5 +264,94 @@ describe("per-pane input transaction", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("seat handover on herdr (no respawn-pane: the seat shell outlives the harness)", () => {
+  // Pane w2:p1, as on a real Windows seat: PowerShell(100) -> Gitinash(200) ->
+  // usrinash(201) -> claude(300) while the harness runs.
+  function seat(harnessRunning: { value: boolean }, shellAlive = { value: true }) {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) => {
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } });
+      }
+      return h.exec(args);
+    };
+    const processTable = async () => [
+      { pid: 100, ppid: 1, name: "powershell.exe" },
+      { pid: 101, ppid: 100, name: "conhost.exe" },
+      ...(shellAlive.value ? [{ pid: 200, ppid: 100, name: "bash.exe" }, { pid: 201, ppid: 200, name: "bash.exe" }] : []),
+      ...(shellAlive.value && harnessRunning.value ? [{ pid: 300, ppid: 201, name: "claude.exe" }] : []),
+    ];
+    return { h, t: new HerdrSeatAdapter({ exec, processTable }) };
+  }
+
+  it("TERM interrupts the harness (double Ctrl-C) and never touches the pane shell", async () => {
+    vi.useFakeTimers();
+    try {
+      const running = { value: true };
+      const { h, t } = seat(running);
+      expect(await t.isPaneDead("dev-impl@r")).toBe(false);
+      expect(await t.getPaneCommand("dev-impl@r")).toBe("claude");
+      const term = t.signalPaneProcess("dev-impl@r", "TERM");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(await term).toEqual({ ok: true });
+      expect(h.calls.filter((c) => c[1] === "send-keys").map((c) => c[3])).toEqual(["ctrl+c", "ctrl+c"]);
+      running.value = false;
+      expect(await t.isPaneDead("dev-impl@r")).toBe(true);
+      expect(await t.getPaneCommand("dev-impl@r")).toBe("bash");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("respawn refuses while the harness runs; afterwards sets cwd/env and starts the command in the shell", async () => {
+    const running = { value: true };
+    const { h, t } = seat(running);
+    expect(await t.setRemainOnExit()).toEqual({ ok: true });
+    expect(await t.respawnPane("dev-impl@r", "codex resume abc")).toMatchObject({ ok: false, code: "pane_busy" });
+    running.value = false;
+    const sent: string[] = [];
+    const bash = String.raw`C:\Program Files\Git\bin\bash.exe`;
+    expect(await t.respawnPane("dev-impl@r", bash, { cwd: String.raw`F:\Work dir`, env: { OPENRIG_NODE_ID: "n1" } })).toEqual({ ok: true });
+    for (const c of h.calls) if (c[1] === "send-text") sent.push(c[3]!);
+    const typed = sent.at(-1)!;
+    // The value is never typed (scrollback/transcripts); the shell sources a private file.
+    expect(typed).not.toContain("n1");
+    const file = /^\. '([^']+)' && rm -rf '[^']+' && cd 'F:\\Work dir'$/.exec(typed)?.[1];
+    expect(file).toBeTruthy();
+    expect(readFileSync(file!, "utf8")).toBe("export OPENRIG_NODE_ID='n1'\n");
+    // A harness command is started in the same shell after cwd/env.
+    expect(await t.respawnPane("dev-impl@r", "codex resume abc")).toEqual({ ok: true });
+    expect(h.calls.filter((c) => c[1] === "send-text").at(-1)?.[3]).toBe("codex resume abc");
+    expect(await t.hasSessionEnv("dev-impl@r", "OPENRIG_NODE_ID")).toBe(true);
+  });
+
+  it("the nested Git Bash shell is never mistaken for the harness (KILL would close the seat shell)", async () => {
+    const running = { value: false };
+    const { h, t } = seat(running);
+    expect(await t.isPaneDead("dev-impl@r")).toBe(true); // bash -> bash, no harness
+    expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toEqual({ ok: true }); // nothing to kill
+    expect(h.calls.some((c) => c[1] === "send-keys")).toBe(false);
+  });
+
+  it("respawn restarts the seat shell first when it is gone", async () => {
+    const shell = { value: false };
+    const { h, t } = seat({ value: false }, shell);
+    expect(await t.respawnPane("dev-impl@r", "codex resume abc")).toEqual({ ok: true });
+    const runs = h.calls.filter((c) => c[1] === "send-text").map((c) => c[3]);
+    expect(runs[0]).toContain("bash.exe");
+    expect(runs.at(-1)).toBe("codex resume abc");
+  });
+});
+
+describe("msysEnvValue", () => {
+  it("converts PATH and HOME the way Git Bash does at startup; leaves native paths alone", async () => {
+    const { msysEnvValue } = await import("../src/adapters/herdr-seat-adapter.js");
+    expect(msysEnvValue("PATH", String.raw`C:\Program Files\nodejs;C:\Users\a\bin`)).toBe("/c/Program Files/nodejs:/c/Users/a/bin");
+    expect(msysEnvValue("HOME", String.raw`C:\Users\a`)).toBe("/c/Users/a");
+    expect(msysEnvValue("CODEX_HOME", String.raw`C:\Users\a\.codex`)).toBe(String.raw`C:\Users\a\.codex`);
+    expect(msysEnvValue("PATH", "/usr/bin:/bin")).toBe("/usr/bin:/bin");
   });
 });

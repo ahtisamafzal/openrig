@@ -4,7 +4,7 @@ import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { shellQuote } from "./shell-quote.js";
-import { codexPostureArg } from "./yolo-mode.js";
+import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 
@@ -89,7 +89,7 @@ export class CodexResumeAdapter {
       undefined,
       resolvedPosture,
       model,
-      postureArg,
+      postureArg + codexSeatEnvArg(),
       daemonSupport?.kind === "supported",
     );
 
