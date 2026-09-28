@@ -102,6 +102,15 @@ export function findExactNativeResumeProcess(
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
 export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
   try {
+    if (process.platform === "win32") {
+      // No `ps`, and no process groups: pgid/tpgid are 0, so the foreground-group proof in
+      // selectCodexProcess stays honestly unproven, while pid/ppid/command/startedAt (for
+      // descendant and thread-id discovery) come from the shared CIM enumeration.
+      const { defaultListProcessesStrict } = await import("./resume-metadata-refresher.js");
+      return (await defaultListProcessesStrict()).map((row) => ({
+        ...row, pgid: 0, tpgid: 0, executableName: executableName(tokens(row.command)[0] ?? ""),
+      }));
+    }
     const output = await runAsyncSite("codex.runtime.list_processes", async () => {
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
       return stdout;

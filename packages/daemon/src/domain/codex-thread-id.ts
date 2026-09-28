@@ -14,6 +14,10 @@ const execFileAsync = promisify(execFile);
 export type ResolveHomeDirByPid = (pid: number) => Promise<string | undefined> | string | undefined;
 
 export async function defaultResolveHomeDirByPid(pid: number): Promise<string | undefined> {
+  // Windows exposes no other process's environment (no `ps eww`, no /proc). Seats
+  // inherit the daemon's home, which the caller already tries next; a per-seat
+  // CODEX_HOME must be carried explicitly instead (roadmap 1.12).
+  if (process.platform === "win32") return undefined;
   try {
     // BSD/macOS `ps` supports `eww` to expose the full process environment.
     // If OpenRig grows a Linux daemon target, this likely needs a /proc-based path.

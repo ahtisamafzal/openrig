@@ -323,6 +323,9 @@ export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid:
 // identity and lstartToMinTs work unchanged. Tab-separated; CommandLine is null for
 // protected processes, so fall back to the image name.
 const WINDOWS_PROCESS_QUERY = [
+  // CIM errors are non-terminating by default: without Stop a failed query exits 0
+  // with no rows, which the census would cache as an empty success.
+  "$ErrorActionPreference = 'Stop';",
   "[Console]::OutputEncoding = [Text.Encoding]::UTF8;",
   "$ic = [Globalization.CultureInfo]::InvariantCulture;",
   "Get-CimInstance Win32_Process | ForEach-Object {",
@@ -340,6 +343,14 @@ export function parseWindowsProcessRows(stdout: string): Array<{ pid: number; pp
   });
 }
 
+/** A live system always has processes: zero parsed rows is a failed enumeration and
+ *  must reject (honest failure), never become a cached empty census. */
+export function windowsCensusRows(stdout: string): Array<{ pid: number; ppid: number; command: string; startedAt: string }> {
+  const rows = parseWindowsProcessRows(stdout);
+  if (rows.length === 0) throw new Error("Windows process census returned no parseable rows");
+  return rows;
+}
+
 /** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn
  *  REJECTS instead of degrading to []. This is the census's default —
  *  through the lenient variant above, an enumeration failure became a CACHED
@@ -350,7 +361,7 @@ export async function defaultListProcessesStrict(): Promise<Array<{ pid: number;
   if (process.platform === "win32") {
     const stdout = await runAsyncSite("resume_metadata.list_processes", async () =>
       (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout);
-    return parseWindowsProcessRows(stdout);
+    return windowsCensusRows(stdout);
   }
   const output = await runAsyncSite("resume_metadata.list_processes", async () => {
     // lstart = the process START TIME — the identity half of pid+start-time

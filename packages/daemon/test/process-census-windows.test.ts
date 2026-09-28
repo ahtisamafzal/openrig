@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { defaultListProcessesStrict, parseWindowsProcessRows } from "../src/domain/resume-metadata-refresher.js";
+import { defaultListProcessesStrict, parseWindowsProcessRows, windowsCensusRows } from "../src/domain/resume-metadata-refresher.js";
 import { lstartToMinTs } from "../src/domain/codex-thread-id.js";
+import { ProcessCensus } from "../src/domain/process-census.js";
 
 describe("Windows process census", () => {
   it("parses tab-separated CIM rows and drops malformed lines", () => {
@@ -20,4 +21,13 @@ describe("Windows process census", () => {
     expect(startSec).toBeDefined();
     expect(Math.abs(startSec! * 1000 - (Date.now() - process.uptime() * 1000))).toBeLessThan(60_000);
   }, 30_000);
+
+  it("rejects an empty or unparseable enumeration, and the census retries instead of caching it", async () => {
+    expect(() => windowsCensusRows("")).toThrow();
+    expect(() => windowsCensusRows("garbage only")).toThrow();
+    let calls = 0;
+    const census = new ProcessCensus({ list: async () => { calls++; return windowsCensusRows(calls === 1 ? "" : "4\t0\t\tSystem"); } });
+    await expect(census.list()).rejects.toThrow();
+    expect(await census.list()).toEqual([{ pid: 4, ppid: 0, startedAt: "", command: "System" }]);
+  });
 });
