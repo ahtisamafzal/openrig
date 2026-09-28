@@ -6,6 +6,8 @@ function app(token: string | null) {
   const a = new Hono();
   a.use("*", remoteCallerGate(token));
   a.get("/healthz", (c) => c.text("ok"));
+  a.get("/", (c) => c.html(isLoopbackRequest(c) ? "<html>token</html>" : "<html></html>"));
+  a.get("/api/rigs", (c) => c.text("rigs"));
   a.post("/api/transport/send", (c) => c.text("sent"));
   return a;
 }
@@ -29,5 +31,15 @@ describe("remoteCallerGate", () => {
   it("treats a socketless in-process request as local", () => {
     expect(isLoopbackRequest({})).toBe(true);
     expect(isLoopbackRequest({ env: from("10.0.0.2") })).toBe(false);
+  });
+  it("treats a same-host reverse proxy as remote", async () => {
+    const proxied = await app(null).request("/api/transport/send", { method: "POST", headers: { "X-Forwarded-For": "203.0.113.9" } }, from("127.0.0.1"));
+    expect(proxied.status).toBe(401);
+    const page = await app(null).request("/", { headers: { Forwarded: "for=203.0.113.9" } }, from("127.0.0.1"));
+    expect(await page.text()).toBe("<html></html>");
+  });
+  it("serves the static shell publicly but gates every API read", async () => {
+    expect((await app("s3cret").request("/", {}, from("192.168.1.5"))).status).toBe(200);
+    expect((await app("s3cret").request("/api/rigs", {}, from("192.168.1.5"))).status).toBe(401);
   });
 });

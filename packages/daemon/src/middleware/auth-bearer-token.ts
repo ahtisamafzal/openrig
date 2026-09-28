@@ -263,28 +263,39 @@ export async function assertBindAuthInvariant(opts: {
   );
 }
 
+// Headers a reverse proxy adds. A same-host proxy (nginx, Caddy) relays remote
+// clients from 127.0.0.1, so a loopback peer carrying any of these is remote.
+const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip"];
+
 /**
- * True when the HTTP caller is on this host. Reads the node-server socket
- * (`c.env.incoming`); a request with no socket (in-process `app.request` from
- * tests or internal callers) is local by construction.
+ * True when the HTTP caller is on this host: a loopback socket peer with no
+ * proxy-forwarding headers. A request with no socket (in-process `app.request`
+ * from tests or internal callers) is local by construction. An SSH tunnel
+ * terminating here also looks local — only someone with host access can open one.
  */
-export function isLoopbackRequest(c: { env?: unknown }): boolean {
+export function isLoopbackRequest(c: { env?: unknown; req?: { header(name: string): string | undefined } }): boolean {
   const address = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
     ?.incoming?.socket?.remoteAddress;
   if (address === undefined) return true;
   const a = address.toLowerCase().replace(/^::ffff:/, "");
-  return a === "::1" || a.startsWith("127.");
+  if (!(a === "::1" || a.startsWith("127."))) return false;
+  return !PROXY_HEADERS.some((h) => c.req?.header(h) !== undefined);
 }
 
 /**
  * Callers on this host pass (the single-host model: CLI, TUI, seats). Any other
- * caller needs the operator bearer for everything except /healthz, and is refused
- * outright when no bearer is configured.
+ * caller needs the operator bearer for every API route and the terminal socket,
+ * and is refused outright when no bearer is configured. /healthz and the static
+ * SPA shell stay public — the shell carries no secrets (the terminal token is only
+ * injected for local pages). ponytail: a remote browser still cannot call the API,
+ * because it cannot attach the header; add a login endpoint issuing an HttpOnly
+ * cookie when remote UI access is wanted.
  */
 export function remoteCallerGate(expectedToken: string | null): MiddlewareHandler {
   const bearer = authBearerTokenMiddleware({ expectedToken });
   return async (c, next) => {
-    if (c.req.path === "/healthz" || isLoopbackRequest(c)) return next();
+    const publicPath = c.req.path === "/healthz" || (c.req.method === "GET" && !c.req.path.startsWith("/api/"));
+    if (publicPath || isLoopbackRequest(c)) return next();
     if (!expectedToken) {
       return c.json(unauthorizedBody("remote access requires OPENRIG_AUTH_BEARER_TOKEN on the daemon"), 401);
     }
