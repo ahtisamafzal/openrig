@@ -176,6 +176,7 @@ export interface LifecycleDeps {
     env: Record<string, string>;
     stdio: unknown;
     detached: boolean;
+    windowsHide?: boolean;
   }) => ChildProcess;
   // OPR.0.4.3.21 — optional `json` lets getDaemonStatus read the enriched
   // /healthz body (event-loop evidence). Optional so existing mocks that
@@ -661,6 +662,10 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     }),
     stdio: ["ignore", logFd, logFd],
     detached: true,
+    // Windows: a detached child gets its own console window, and every console
+    // program the daemon polls (bash, git, herdr) flashes one. Hide it once here;
+    // descendants inherit the hidden console.
+    windowsHide: true,
     });
   } finally { deps.closeFile?.(logFd); }
 
