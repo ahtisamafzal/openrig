@@ -111,6 +111,11 @@ const PANE_FORMAT = [
 ].join(TMUX_FIELD_SEPARATOR);
 const CLIENT_FORMAT = "#{client_name}\t#{client_session}";
 
+/** The tmux-authored text of an exec error (after node's "Command failed: <cmd>" line). */
+function extractTmuxText(err: Error): string {
+  return err.message.split("\n").slice(1).join("\n").trim();
+}
+
 function isNoServerError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("no server running");
 }
@@ -249,7 +254,9 @@ export class TmuxAdapter {
       // tmux -D keeps an empty server alive. Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
-      for (let attempt = 0; attempt < 20; attempt++) {
+      // psmux (Windows) starts noticeably slower than tmux.
+      const attempts = process.platform === "win32" ? 120 : 20;
+      for (let attempt = 0; attempt < attempts; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 25));
         if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
       }
@@ -313,6 +320,16 @@ export class TmuxAdapter {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) {
         return { state: "transport_unavailable", cause: (err as Error).message };
       }
+      // psmux (native Windows tmux) exits 1 with no message for a missing
+      // session. A reachable server then proves absence; otherwise fail closed.
+      if (process.platform === "win32" && err instanceof Error && !extractTmuxText(err)) {
+        try {
+          await this.exec("tmux list-sessions");
+          return { state: "absent" };
+        } catch (listErr) {
+          return { state: "transport_unavailable", cause: (listErr as Error).message };
+        }
+      }
       throw err;
     }
   }
@@ -333,7 +350,12 @@ export class TmuxAdapter {
     const envFlags = env
       ? Object.entries(env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
       : "";
-    const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}${envFlags}`;
+    // psmux defaults panes to PowerShell and runs the pane command through it;
+    // seats expect a POSIX shell. Name Git Bash explicitly (plain `bash` is WSL).
+    const paneShell = process.platform === "win32"
+      ? ` ${shellQuote(`& "${process.env.OPENRIG_PANE_SHELL ?? "C:\\Program Files\\Git\\bin\\bash.exe"}"`)}`
+      : "";
+    const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}${envFlags}${paneShell}`;
     try {
       await this.exec(cmd);
       return { ok: true };
@@ -724,7 +746,7 @@ export class TmuxAdapter {
   /** Get a session-scoped user option value. Returns null if not set or error. */
   async getSessionOption(sessionName: string, key: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      const output = await this.exec(`tmux show-options -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
       return output.trim() || null;
     } catch {
       return null;

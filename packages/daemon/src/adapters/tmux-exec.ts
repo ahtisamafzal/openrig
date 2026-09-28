@@ -4,6 +4,12 @@ import type { ExecFn } from "./tmux.js";
 
 const execAsync = promisify(exec);
 
+// Adapter commands are POSIX shell strings (quoting, redirects, `&`). On
+// Windows, run them through Git Bash instead of cmd.exe.
+const POSIX_SHELL = process.platform === "win32"
+  ? process.env.OPENRIG_POSIX_SHELL ?? "C:\\Program Files\\Git\\bin\\bash.exe"
+  : undefined;
+
 function extractExecOutput(err: unknown): string {
   if (!err || typeof err !== "object") return "";
   const stdout = typeof (err as { stdout?: unknown }).stdout === "string"
@@ -21,7 +27,7 @@ function extractExecOutput(err: unknown): string {
  */
 export const execCommand: ExecFn = async (cmd: string): Promise<string> => {
   try {
-    const { stdout } = await execAsync(cmd);
+    const { stdout } = await execAsync(cmd, { shell: POSIX_SHELL });
     return stdout;
   } catch (err) {
     const output = extractExecOutput(err);
