@@ -356,10 +356,12 @@ export function windowsCensusRows(stdout: string): WindowsProcessRow[] {
 }
 
 export async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
-  const stdout = await runAsyncSite("resume_metadata.list_processes", async () =>
-    (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout);
+  const snapshot = async () => windowsCensusRows(await runAsyncSite("resume_metadata.list_processes", async () =>
+    (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout));
   // Git Bash fork/exec leaves seat harnesses with dead Windows parents; lineage needs MSYS's.
-  return withMsysParents(windowsCensusRows(stdout));
+  // ponytail: startedAt is second-resolution; a pid reused within the same second between
+  // the bracketing snapshots would pass. Use CreationDate ticks if that is ever seen.
+  return withMsysParents(snapshot, (r) => r.startedAt || undefined);
 }
 
 /** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn

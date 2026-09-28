@@ -36,13 +36,35 @@ export function parseMsysParents(psOutput: string): Map<number, number> {
   return parents;
 }
 
-/** Re-parent rows whose MSYS parent is known. No Git Bash (or ps fails) = rows unchanged. */
-export async function withMsysParents<T extends { pid: number; ppid: number }>(rows: T[], psPath = msysPsPath()): Promise<T[]> {
+/**
+ * Re-parent Windows rows from MSYS ps. The two tools cannot be read atomically, and
+ * Windows reuses pids, so the MSYS snapshot is BRACKETED by two Windows snapshots: a
+ * link is applied only when the child and the parent kept the same pid AND start time
+ * across both. Rows with no start time are never re-parented. No Git Bash (or ps
+ * fails) = the latest Windows snapshot unchanged.
+ */
+export async function withMsysParents<T extends { pid: number; ppid: number }>(
+  snapshot: () => Promise<T[]>,
+  startedOf: (row: T) => string | undefined,
+  readPs: () => Promise<string> = async () =>
+    (await execFileAsync(msysPsPath(), ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout,
+): Promise<T[]> {
+  const before = await snapshot();
   let parents: Map<number, number>;
   try {
-    parents = parseMsysParents((await execFileAsync(psPath, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout);
+    parents = parseMsysParents(await readPs());
   } catch {
-    return rows;
+    return before;
   }
-  return rows.map((r) => (parents.has(r.pid) ? { ...r, ppid: parents.get(r.pid)! } : r));
+  const after = await snapshot();
+  const startedBefore = new Map(before.map((r) => [r.pid, startedOf(r)]));
+  const startedAfter = new Map(after.map((r) => [r.pid, startedOf(r)]));
+  const stable = (pid: number) => {
+    const s = startedAfter.get(pid);
+    return s !== undefined && s === startedBefore.get(pid);
+  };
+  return after.map((r) => {
+    const parent = parents.get(r.pid);
+    return parent !== undefined && stable(r.pid) && stable(parent) ? { ...r, ppid: parent } : r;
+  });
 }

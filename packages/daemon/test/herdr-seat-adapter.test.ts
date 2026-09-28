@@ -430,3 +430,26 @@ describe("parseMsysParents (Git Bash fork/exec leaves Windows parents dead)", ()
     expect(parents.has(50776)).toBe(false);
   });
 });
+
+describe("KILL re-checks pid identity (Windows reuses pids)", () => {
+  it("refuses when the harness pid now belongs to a different process; kills when unchanged", async () => {
+    const h = fakeHerdr();
+    const exec = async (args: string[]) =>
+      args[0] === "pane" && args[1] === "process-info"
+        ? JSON.stringify({ id: "cli", result: { process_info: { shell_pid: 100 } } })
+        : h.exec(args);
+    let harnessStart = "t1";
+    let reads = 0;
+    const processTable = async () => {
+      reads++;
+      return [
+        { pid: 100, ppid: 1, name: "powershell.exe", started: "t0" },
+        { pid: 200, ppid: 100, name: "bash.exe", started: "t0" },
+        { pid: 300, ppid: 200, name: "claude.exe", started: reads > 1 ? harnessStart : "t1" },
+      ];
+    };
+    harnessStart = "t9"; // pid 300 exited and was reused before the kill
+    const t = new HerdrSeatAdapter({ exec, processTable });
+    expect(await t.signalPaneProcess("dev-impl@r", "KILL")).toMatchObject({ ok: false, code: "ambiguous_harness" });
+  });
+});

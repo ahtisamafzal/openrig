@@ -71,22 +71,25 @@ export interface HerdrSeatAdapterOptions {
   processTable?: () => Promise<ProcessRow[]>;
 }
 
-export interface ProcessRow { pid: number; ppid: number; name: string }
+/** `started` (Windows creation time) pins a pid's identity: Windows reuses pids. */
+export interface ProcessRow { pid: number; ppid: number; name: string; started?: string }
 
 async function cimProcessTable(): Promise<ProcessRow[]> {
   const { stdout } = await execFileAsync("powershell", [
     "-NoProfile", "-Command",
-    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name)\" }",
+    "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.CreationDate.ToString('o')),$($_.Name)\" }",
   ], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
   return stdout.split(/\r?\n/).flatMap((line) => {
-    const [pid, ppid, name] = line.split(",");
-    return pid && ppid && name ? [{ pid: Number(pid), ppid: Number(ppid), name }] : [];
+    const [pid, ppid, started, ...rest] = line.split(",");
+    const name = rest.join(",");
+    return pid && ppid && name ? [{ pid: Number(pid), ppid: Number(ppid), name, started: started || undefined }] : [];
   });
 }
 
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
 async function defaultProcessTable(msysPs: string): Promise<ProcessRow[]> {
-  return withMsysParents(await cimProcessTable(), msysPs);
+  return withMsysParents(cimProcessTable, (r) => r.started, async () =>
+    (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout);
 }
 
 interface HerdrPaneInfo {
@@ -724,6 +727,11 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         await new Promise((r) => setTimeout(r, INTERRUPT_GAP_MS));
         await this.text(["pane", "send-keys", id, "ctrl+c"]);
       } else {
+        // Windows reuses pids: re-check the harness is still the process we identified.
+        const now = h.started ? (await this.processTable().catch(() => [])).find((r) => r.pid === h.pid) : undefined;
+        if (!now || now.started !== h.started) {
+          return { ok: false, code: "ambiguous_harness", message: `refusing to force-kill pid ${h.pid} in ${paneId}: it no longer matches the identified harness` };
+        }
         await execFileAsync("taskkill", ["/PID", String(h.pid), "/T", "/F"], { windowsHide: true });
       }
       return { ok: true };

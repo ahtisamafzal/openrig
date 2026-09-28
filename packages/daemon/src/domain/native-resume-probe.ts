@@ -182,7 +182,11 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for hook trust approval before the session can become interactive.",
       };
     }
-    if (looksLikeCodexTui(paneContent)) {
+    // A footer-only match (no "OpenAI Codex (v" header in view) is scrollback-shaped: a Codex
+    // that rendered its footer and exited leaves it behind. Only trust it while the pane
+    // command is not a bare shell.
+    const headerInView = paneContent.includes("OpenAI Codex (v");
+    if (looksLikeCodexTui(paneContent) && (headerInView || !SHELL_COMMANDS.has(paneCommand))) {
       return {
         status: "resumed",
         code: "active_runtime",
