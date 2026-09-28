@@ -3,6 +3,14 @@ import { detectConflicts, type GuidanceConflictMeta } from "../src/domain/confli
 import { InstallPlanner, type InstallPlanEntry } from "../src/domain/install-planner.js";
 import { PackageResolver, type FsOps } from "../src/domain/package-resolver.js";
 
+// These tests drive the code against an in-memory fs keyed by POSIX paths; run the
+// code's path handling as POSIX so the fixtures hold on Windows too.
+vi.mock("node:path", async () => {
+  const actual = await vi.importActual<typeof import("node:path")>("node:path");
+  return { ...actual.posix, default: actual.posix };
+});
+
+
 function mockFs(files: Record<string, string>): FsOps {
   return {
     readFile: vi.fn((p: string) => {
