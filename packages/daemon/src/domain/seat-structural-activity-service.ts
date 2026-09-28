@@ -1,6 +1,11 @@
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
+import { classifyPaneWithJev, jevPaneEnabled, type JevPaneState } from "./jev-pane-classifier.js";
+
+const JEV_TO_PANE: Record<JevPaneState, PaneActivityClassification["state"]> = {
+  idle: "agent_idle", running: "agent_active", needs_input: "attention",
+};
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -79,7 +84,12 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = classifyPaneActivity(content);
+    let c = classifyPaneActivity(content);
+    if (c.state === "unknown" && jevPaneEnabled()) {
+      // Structure found no signal (herdr's Windows panes): ask Jev. Null keeps unknown.
+      const jev = await classifyPaneWithJev(content);
+      if (jev) c = { state: JEV_TO_PANE[jev.state], reason: `jev_${jev.state}`, evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}` };
+    }
     const obs: StructuralObservation = {
       state: c.state,
       reason: c.reason,

@@ -133,5 +133,69 @@ describe("pendingPaste (Codex composer still holds a paste)", () => {
     expect(pendingPaste("# Role: QA\n  Run `rig whoami --json`, then resolve [Pasted Content 1101 chars]From: x\n  GPT-5.6")).toBe(true);
     expect(pendingPaste("› Ask Codex to do anything\n\n  GPT-5.6 default")).toBe(false);
     expect(pendingPaste(`[Pasted Content 5 chars]\n${"line\n".repeat(20)}`)).toBe(false);
+    // A submitted paste above newer agent output is history, not composer input.
+    expect(pendingPaste("› [Pasted Content 900 chars]\n• Working (3s • esc to interrupt)\n› draft text\n  GPT-5.6 default")).toBe(false);
+  });
+
+  it("a background recheck never presses Enter after a newer paste", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fakeHerdr();
+      const screen = "› [Pasted Content 1101 chars]\n  GPT-5.6 default";
+      const exec = async (args: string[]) => (args[0] === "pane" && args[1] === "read" ? screen : h.exec(args));
+      const t = new HerdrSeatAdapter({ exec });
+      await t.sendText("dev-impl@r", "first\nmessage");
+      const firstEnter = t.sendKeys("dev-impl@r", ["Enter"]);
+      await vi.advanceTimersByTimeAsync(700);
+      await firstEnter;
+      await t.sendText("dev-impl@r", "second\nmessage"); // supersedes the first paste's recheck
+      const enters = () => h.calls.filter((c) => c[1] === "send-keys" && c[3] === "enter").length;
+      const before = enters();
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(enters()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("while its paste is current, the recheck re-sends Enter", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fakeHerdr();
+      let screen = "› [Pasted Content 1101 chars]\n  GPT-5.6 default";
+      const exec = async (args: string[]) => (args[0] === "pane" && args[1] === "read" ? screen : h.exec(args));
+      const t = new HerdrSeatAdapter({ exec });
+      await t.sendText("dev-impl@r", "only\nmessage");
+      const enter = t.sendKeys("dev-impl@r", ["Enter"]);
+      await vi.advanceTimersByTimeAsync(700);
+      await enter;
+      const enters = () => h.calls.filter((c) => c[1] === "send-keys" && c[3] === "enter").length;
+      const before = enters();
+      await vi.advanceTimersByTimeAsync(2_600);
+      expect(enters()).toBe(before + 1);
+      screen = "• Working (1s)\n› Ask Codex to do anything";
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(enters()).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("readPaneLastActivity (herdr revision motion)", () => {
+  it("first sighting is a baseline, not activity; a later revision change is", async () => {
+    let revision = 7;
+    const h = fakeHerdr();
+    const exec = async (args: string[]) => {
+      if (args[0] === "pane" && args[1] === "list") {
+        return JSON.stringify({ id: "cli", result: { panes: [{ pane_id: "w2:p1", workspace_id: "w2", label: "dev-impl@r", revision }] } });
+      }
+      return h.exec(args);
+    };
+    const t = new HerdrSeatAdapter({ exec });
+    expect(await t.readPaneLastActivity("dev-impl@r")).toBeNull();
+    expect(await t.readPaneLastActivity("dev-impl@r")).toBeNull();
+    revision = 8;
+    expect(await t.readPaneLastActivity("dev-impl@r")).toBeTypeOf("number");
   });
 });

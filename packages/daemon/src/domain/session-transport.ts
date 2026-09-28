@@ -1,3 +1,4 @@
+import { classifyPaneWithJev, jevPaneEnabled } from "./jev-pane-classifier.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -297,6 +298,19 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await input.tmuxAdapter.capturePaneContent(input.sessionName, 20);
     const classification = classifyPaneActivity(paneContent ?? "");
+    if (classification.state === "unknown" && jevPaneEnabled()) {
+      const jev = await classifyPaneWithJev(paneContent ?? "");
+      if (jev) {
+        return {
+          state: jev.state,
+          reason: `jev_${jev.state}`,
+          evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}; ${classification.reason}`,
+          evidenceSource: "pane_heuristic",
+          sampledAt,
+          fallback: true,
+        };
+      }
+    }
     return {
       state: mapPaneState(classification.state),
       reason: classification.reason,

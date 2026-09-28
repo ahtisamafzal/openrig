@@ -32,10 +32,18 @@ const PASTE_SETTLE_MS = 600;
 const SUBMIT_CHECK_MS = 2500;
 const SUBMIT_RETRIES = 6; // ~15s: covers Codex startup hooks + MCP boot
 
-/** A Codex paste placeholder still sitting in the composer (last lines of the screen). */
+/**
+ * A Codex paste placeholder still sitting in the COMPOSER. The composer is the
+ * block below the last agent-output bullet (• / ●): a placeholder above that
+ * line is history, not pending input. Only the bottom 8 non-empty lines count.
+ */
 export function pendingPaste(screen: string): boolean {
-  const tail = screen.split("\n").filter((l) => l.trim()).slice(-8).join("\n");
-  return /\[Pasted Content \d+ chars\]/.test(tail);
+  const lines = screen.split("\n").filter((l) => l.trim()).slice(-8);
+  let lastOutput = -1;
+  lines.forEach((l, i) => {
+    if (/^\s*[•●]\s/.test(l)) lastOutput = i;
+  });
+  return lines.slice(lastOutput + 1).some((l) => /\[Pasted Content \d+ chars\]/.test(l));
 }
 
 export type HerdrExecFn = (args: string[]) => Promise<string>;
@@ -172,6 +180,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
   private readonly sessionEnvKeys = new Map<string, Set<string>>();
   private readonly activity = new Map<string, { revision: number; at: number }>();
   private readonly lastPasteAt = new Map<string, number>();
+  /** Bumped on every paste; a background submit-recheck stops once its paste is superseded. */
+  private readonly pasteGeneration = new Map<string, number>();
   private preflightResult: Promise<TmuxResult> | null = null;
 
   constructor(opts: HerdrSeatAdapterOptions = {}) {
@@ -400,6 +410,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       // keeps multi-line text in the input until the caller's explicit submit.
       const payload = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
       this.lastPasteAt.set(id, Date.now());
+      this.pasteGeneration.set(id, (this.pasteGeneration.get(id) ?? 0) + 1);
       // Windows caps a command line near 32K chars; send long text in slices.
       for (let i = 0; i < payload.length; i += 8000) {
         await this.text(["pane", "send-text", id, payload.slice(i, i + 8000)]);
@@ -439,7 +450,7 @@ export class HerdrSeatAdapter extends TmuxAdapter {
         if ("key" in mapped) await this.text(["pane", "send-keys", id, mapped.key]);
         else await this.text(["pane", "send-text", id, mapped.text]);
         // Background: the recheck can take ~15s, far past the CLI's 5s send timeout.
-        if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) void this.confirmSubmitted(id).catch(() => {});
+        if ("key" in mapped && mapped.key === "enter" && this.lastPasteAt.delete(id)) void this.confirmSubmitted(id, this.pasteGeneration.get(id) ?? 0).catch(() => {});
       }
       return { ok: true };
     } catch (err) {
@@ -454,11 +465,15 @@ export class HerdrSeatAdapter extends TmuxAdapter {
    * so look for the placeholder anywhere in the composer area (bottom of the
    * screen), and keep re-sending Enter while Codex is still starting up.
    */
-  private async confirmSubmitted(id: string): Promise<void> {
+  private async confirmSubmitted(id: string, generation: number): Promise<void> {
+    const current = () => (this.pasteGeneration.get(id) ?? 0) === generation;
     for (let attempt = 0; attempt < SUBMIT_RETRIES; attempt++) {
       await new Promise((r) => setTimeout(r, SUBMIT_CHECK_MS));
+      if (!current()) return; // a newer send owns the composer now
       const screen = await this.text(["pane", "read", id, "--source", "visible"]).catch(() => "");
-      if (!pendingPaste(screen)) return;
+      // ponytail: generation is re-checked right before Enter; a send landing inside
+      // this sub-millisecond window could still be hit. Add per-pane input locks if seen.
+      if (!pendingPaste(screen) || !current()) return;
       await this.text(["pane", "send-keys", id, "enter"]);
     }
   }
@@ -488,10 +503,16 @@ export class HerdrSeatAdapter extends TmuxAdapter {
       if (!pane || pane.revision == null) return null;
       const now = Math.floor(Date.now() / 1000);
       const seen = this.activity.get(pane.pane_id);
-      if (!seen || seen.revision !== pane.revision) {
+      // First sighting (e.g. after a daemon restart) is a baseline, not output: no clock yet.
+      if (!seen) {
+        this.activity.set(pane.pane_id, { revision: pane.revision, at: 0 });
+        return null;
+      }
+      if (seen.revision !== pane.revision) {
         this.activity.set(pane.pane_id, { revision: pane.revision, at: now });
         return now;
       }
+      if (seen.at === 0) return null;
       return seen.at;
     } catch {
       return null;
