@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import type { ProviderService } from "../domain/provider/provider-service.js";
+import { seatProviderHealth } from "../domain/provider/provider-policy.js";
 
 // Slice-04 (OPR.0.5.0.4) seam B — the `/api/provider` routes (packet 3ffa3c22 §3). Thin handlers
 // over ONE service read model (filtered projections cannot diverge). Edge validation -> 400; an
@@ -85,6 +86,17 @@ export function providerRoutes(): Hono {
       (s) => (provider === undefined || s.provider === provider) && (account === undefined || s.accountRef === account),
     );
     return c.json({ signals }, 200);
+  });
+
+  // Roadmap 3.5 — one seat's provider health from the shared calculation (seatProviderHealth):
+  // `limited` / `healthy` only on fresh, eligible evidence; otherwise `unknown` (never a reason to
+  // switch). Arete reads this before dispatching to a seat and before failing over.
+  router.get("/seat-health", async (c) => {
+    const svc = svcOf(c);
+    if (!svc) return c.json({ error: "provider_service_unavailable" }, unavailable);
+    const seat = c.req.query("seat");
+    if (!seat || !seat.trim()) return c.json({ error: "seat is required" }, 400);
+    return c.json(seatProviderHealth(await svc.getReadModel(), seat, new Date().toISOString()), 200);
   });
 
   router.get("/precheck", async (c) => {

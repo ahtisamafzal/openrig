@@ -297,16 +297,30 @@ describe("silence-classifier nudge ledger (engine path)", () => {
 });
 
 describe("provider evidence -> health", () => {
-  const model = (usedPercent: number, resetsAt?: string) => async () => ({
+  const sig = (over: Record<string, unknown> = {}) => ({
+    provider: "codex" as const,
+    accountRef: "acct-1",
+    sourceClass: "provider_structured_read" as const,
+    authority: "account_cross_device" as const,
+    asOf: "2026-09-29T09:59:00.000Z",
+    staleAfter: "2026-09-29T10:05:00.000Z",
+    automationUse: "allow_switch_decision" as const,
+    ...over,
+  });
+  const model = (usedPercent: number, resetsAt?: string, over: Record<string, unknown> = {}) => async () => ({
     bindings: [{ accountId: "acct-1", seatSession: SEAT }],
-    signals: [{ accountRef: "acct-1", usedPercent, ...(resetsAt ? { resetsAt } : {}) }],
+    signals: [sig({ usedPercent, ...(resetsAt ? { resetsAt } : {}), ...over })] as never[],
   });
   const now = () => Date.parse("2026-09-29T10:00:00.000Z");
-  it("an exhausted window (not yet reset) on the seat's account is rate_limit; otherwise healthy", async () => {
+  it("a FRESH exhausted window (not yet reset) on the seat's account is rate_limit; otherwise healthy", async () => {
     expect(await providerHealthFrom(model(100, "2026-09-29T12:00:00.000Z"), { now })(SEAT)).toMatchObject({ lastFailureClass: "rate_limit" });
     expect(await providerHealthFrom(model(100, "2026-09-29T09:00:00.000Z"), { now })(SEAT)).toEqual(HEALTHY); // already reset
     expect(await providerHealthFrom(model(80), { now })(SEAT)).toEqual(HEALTHY);
     expect(await providerHealthFrom(model(100), { now })("other@rig")).toEqual(HEALTHY);
+  });
+  it("stale or advisory limit evidence is not a limit (the shared 3.5 eligibility)", async () => {
+    expect(await providerHealthFrom(model(100, "2026-09-29T12:00:00.000Z", { staleAfter: "2026-09-29T09:30:00.000Z" }), { now })(SEAT)).toEqual(HEALTHY);
+    expect(await providerHealthFrom(model(100, "2026-09-29T12:00:00.000Z", { automationUse: "advisory_only" }), { now })(SEAT)).toEqual(HEALTHY);
   });
   it("reads the provider model once per ttl, and never caches a failure", async () => {
     let reads = 0;

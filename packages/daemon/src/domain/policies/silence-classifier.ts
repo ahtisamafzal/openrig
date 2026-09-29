@@ -18,6 +18,8 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SeatActivityService } from "../seat-activity-service.js";
 import { decideSilence, type SilenceHealth } from "../silence-classifier.js";
+import { seatProviderHealth } from "../provider/provider-policy.js";
+import type { ProviderSignal } from "../provider/provider-types.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
 export interface SilenceEscalation {
@@ -169,14 +171,15 @@ export function makeSilenceClassifierPolicy(deps: SilenceClassifierDeps): Policy
 }
 
 /**
- * Provider evidence -> classifier health: a seat whose usage window is used up (and not yet reset)
- * is `rate_limit` (the classifier pauses instead of nudging). The read model is cached for
+ * Provider evidence -> classifier health, via the shared 3.5 calculation (`seatProviderHealth`):
+ * a seat with FRESH, eligible limit evidence is `rate_limit` (the classifier pauses instead of
+ * nudging); stale, advisory or missing evidence is not a limit. The read model is cached for
  * `ttlMs` so a tick over many seats costs one read.
  */
 export function providerHealthFrom(
   getReadModel: () => Promise<{
     bindings: Array<{ accountId: string | null; seatSession?: string }>;
-    signals: Array<{ seatSession?: string; accountRef?: string; usedPercent?: number; resetsAt?: string }>;
+    signals: ProviderSignal[];
   }>,
   opts: { ttlMs?: number; now?: () => number } = {},
 ): (seat: string) => Promise<SilenceHealth> {
@@ -188,14 +191,9 @@ export function providerHealthFrom(
       cached = null; // do not cache a failure
       throw err;
     });
-    const account = model.bindings.find((b) => b.seatSession === seat)?.accountId ?? null;
-    const exhausted = model.signals.some(
-      (s) =>
-        (s.seatSession === seat || (account !== null && s.accountRef === account)) &&
-        typeof s.usedPercent === "number" &&
-        s.usedPercent >= 100 &&
-        (!s.resetsAt || Date.parse(s.resetsAt) > now()),
-    );
-    return exhausted ? { recentFailureCount: 1, permanentlyUnhealthy: false, lastFailureClass: "rate_limit" } : HEALTHY;
+    const h = seatProviderHealth(model, seat, new Date(now()).toISOString());
+    return h.verdict === "limited"
+      ? { recentFailureCount: Math.max(1, h.recentFailures), permanentlyUnhealthy: false, lastFailureClass: "rate_limit" }
+      : HEALTHY;
   };
 }

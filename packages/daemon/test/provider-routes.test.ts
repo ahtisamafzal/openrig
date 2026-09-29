@@ -43,6 +43,17 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
+  it("GET /seat-health: old evidence is unknown (never a switch reason); seat is required; unwired is 503", async () => {
+    const app = appWith(stubService);
+    const res = await app.request("/api/provider/seat-health?seat=seat-1");
+    expect(res.status).toBe(200);
+    const h = await res.json();
+    expect(h).toMatchObject({ seat: "seat-1", verdict: "unknown", reasons: ["no_fresh_eligible_evidence"] });
+    expect(h.evidence[0].refusals).toContain("stale");
+    expect((await app.request("/api/provider/seat-health")).status).toBe(400);
+    expect((await appWith(null).request("/api/provider/seat-health?seat=seat-1")).status).toBe(503);
+  });
+
   it("GET /status returns the whole four-block model", async () => {
     const res = await appWith(stubService).request("/api/provider/status");
     expect(res.status).toBe(200);

@@ -57,6 +57,87 @@ export function signalEligibleForAutomation(
   return { eligible: refusals.length === 0, refusals };
 }
 
+// ── Seat provider health (roadmap 3.5) ──────────────────────────────────────────────────
+// ONE time-bounded health calculation per seat, shared by the silence classifier (3.1) and by
+// Arete's pre-dispatch / failover decisions (3.3/3.5). Only evidence that passes BR-2 eligibility
+// (known, allow_switch_decision, provably fresh) can say `limited` or `healthy`; with no such
+// evidence the verdict is `unknown` — and unknown never justifies switching away from a seat.
+
+export type SeatHealthVerdict = "limited" | "healthy" | "unknown";
+
+export interface SeatProviderHealth {
+  seat: string;
+  verdict: SeatHealthVerdict;
+  /** When `limited`: the latest instant any limiting evidence says the limit lasts until. */
+  limitedUntil?: string;
+  /** Why the verdict is `unknown` (`no_signals` | `no_fresh_eligible_evidence`). */
+  reasons: string[];
+  /** Fresh reactive error events for the seat (advisory ones included): time-bounded by their
+   *  freshness, so old failures never count (the Rust ledger's all-history flaw is not ported). */
+  recentFailures: number;
+  evidence: Array<{
+    sourceClass: string;
+    authority: string;
+    window?: string;
+    usedPercent?: number;
+    resetsAt?: string;
+    asOf: string;
+    staleAfter?: string;
+    eligible: boolean;
+    refusals: AutomationRefusal[];
+  }>;
+  asOf: string;
+}
+
+type HealthModel = {
+  bindings: Array<{ accountId: string | null; seatSession?: string }>;
+  signals: ProviderSignal[];
+};
+
+export function seatProviderHealth(model: HealthModel, seat: string, nowIso: string): SeatProviderHealth {
+  const nowMs = Date.parse(nowIso);
+  const account = model.bindings.find((b) => b.seatSession === seat)?.accountId ?? null;
+  const relevant = model.signals.filter((s) => s.seatSession === seat || (account !== null && s.accountRef === account));
+  const evidence: SeatProviderHealth["evidence"] = [];
+  let eligibleCount = 0;
+  let limitedUntil: string | undefined;
+  let limited = false;
+  let recentFailures = 0;
+  for (const s of relevant) {
+    const el = signalEligibleForAutomation(s, nowIso);
+    evidence.push({
+      sourceClass: s.sourceClass,
+      authority: s.authority,
+      ...(s.window !== undefined ? { window: String(s.window) } : {}),
+      ...(s.usedPercent !== undefined ? { usedPercent: s.usedPercent } : {}),
+      ...(s.resetsAt !== undefined ? { resetsAt: s.resetsAt } : {}),
+      asOf: s.asOf,
+      ...(s.staleAfter !== undefined ? { staleAfter: s.staleAfter } : {}),
+      eligible: el.eligible,
+      refusals: el.refusals,
+    });
+    const reactive = s.sourceClass === "provider_event" && s.authority === "reactive_error";
+    if (reactive && s.staleAfter && Date.parse(s.staleAfter) > nowMs) recentFailures++;
+    if (!el.eligible) continue;
+    eligibleCount++;
+    let until: string | undefined;
+    if (reactive) {
+      until = s.staleAfter; // at-limit exhaustion, known only until the event goes stale
+    } else if (typeof s.usedPercent === "number" && s.usedPercent >= 100) {
+      const resetMs = s.resetsAt ? Date.parse(s.resetsAt) : NaN;
+      if (s.resetsAt && !Number.isNaN(resetMs) && resetMs <= nowMs) continue; // window already reset
+      until = s.resetsAt && !Number.isNaN(resetMs) ? s.resetsAt : s.staleAfter;
+    } else {
+      continue;
+    }
+    limited = true;
+    if (until && (!limitedUntil || Date.parse(until) > Date.parse(limitedUntil))) limitedUntil = until;
+  }
+  const verdict: SeatHealthVerdict = limited ? "limited" : eligibleCount > 0 ? "healthy" : "unknown";
+  const reasons = verdict !== "unknown" ? [] : relevant.length === 0 ? ["no_signals"] : ["no_fresh_eligible_evidence"];
+  return { seat, verdict, ...(limitedUntil ? { limitedUntil } : {}), reasons, recentFailures, evidence, asOf: nowIso };
+}
+
 // ── Precheck: the §1 switch-safety gate ─────────────────────────────────────────────────
 // precheckSwitch decides whether switching a seat to a target account is SAFE, so the UI and
 // automation never offer an unsafe action. Every unsafe condition is an explicit, fail-visible
