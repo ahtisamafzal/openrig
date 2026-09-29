@@ -111,10 +111,21 @@ export function handleBoundKillScript(pid: number, started: string): string {
   ].join("; ");
 }
 
+// One table at a time: each is a PowerShell/CIM + ps spawn (seconds), and every seat
+// check (command, activity, stop) asked for its own, so under load they overlapped and
+// piled up. Concurrent callers share the in-flight table; nothing is cached after it settles.
+const processTableInFlight = new Map<string, Promise<ProcessRow[]>>();
+
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
-async function defaultProcessTable(msysPs: string): Promise<ProcessRow[]> {
-  return withMsysParents(cimProcessTable, (r) => (r.started ? new Date(r.started) : undefined), async () =>
-    (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout, { keepUnverified: true });
+export function defaultProcessTable(msysPs: string, readCim = cimProcessTable): Promise<ProcessRow[]> {
+  let table = processTableInFlight.get(msysPs);
+  if (!table) {
+    table = withMsysParents(readCim, (r) => (r.started ? new Date(r.started) : undefined), async () =>
+      (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout, { keepUnverified: true })
+      .finally(() => processTableInFlight.delete(msysPs));
+    processTableInFlight.set(msysPs, table);
+  }
+  return table;
 }
 
 interface HerdrPaneInfo {

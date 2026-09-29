@@ -113,3 +113,18 @@ describe("withMsysParents: pid reused WHILE ps runs", () => {
     expect(kept.find((r) => r.pid === 300)).toMatchObject({ ppid: 200, unverified: true });
   });
 });
+
+describe("herdr seat process table: concurrent checks share one census", () => {
+  it("overlapping callers get the same table from ONE CIM read; the next call reads fresh", async () => {
+    const { defaultProcessTable } = await import("../src/adapters/herdr-seat-adapter.js");
+    let reads = 0;
+    const readCim = async () => { reads++; await new Promise((r) => setTimeout(r, 30)); return [{ pid: 1, ppid: 0, name: "x" }]; };
+    const noPs = "Z:/no/such/ps.exe";
+    const [a, b, c] = await Promise.all([defaultProcessTable(noPs, readCim), defaultProcessTable(noPs, readCim), defaultProcessTable(noPs, readCim)]);
+    expect(reads).toBe(1);
+    expect(a).toBe(b);
+    expect(b).toBe(c);
+    await defaultProcessTable(noPs, readCim);
+    expect(reads).toBe(2); // nothing cached after it settles
+  });
+});
