@@ -112,6 +112,7 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destination.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
+import { makeSilenceClassifierPolicy, providerHealthFrom } from "./domain/policies/silence-classifier.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -1877,6 +1878,29 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
         makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
+        // Roadmap 3.1: the Arete silence watchdog as one injected policy — the ported 6-way
+        // classifier over this seat's claimed Arete step work, the arbitrated activity oracle and
+        // provider evidence; nudges via the engine, escalations as one human-gate item per episode.
+        makeSilenceClassifierPolicy({
+          db,
+          seatActivity: seatActivityService,
+          history: watchdogHistoryLogInstance,
+          ...(deps.providerService ? { healthOf: providerHealthFrom(() => deps.providerService!.getReadModel()) } : {}),
+          escalate: async (e) => {
+            const item = await queueRepoInstance.create({
+              qitemId: e.qitemId,
+              sourceSession: e.sourceSession,
+              destinationSession: e.destination ?? resolveWorkflowHumanDestination(),
+              body: e.body,
+              priority: "urgent",
+              tier: "human-gate",
+              tags: ["watchdog-escalation", `seat:${e.seat}`],
+              summary: e.summary,
+              evidenceRef: e.evidenceRef,
+            });
+            return { qitemId: item.qitemId };
+          },
+        }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation

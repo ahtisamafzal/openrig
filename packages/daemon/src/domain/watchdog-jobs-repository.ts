@@ -41,6 +41,9 @@ export const PHASE_D_POLICIES = [
   // additionalPolicies like parked-owner-consumer.
   "delivery-deferral",
   "delivery-digest-flush",
+  // Roadmap 3.1 — the Arete silence classifier (6-way) over a seat's claimed Arete step work;
+  // injected via additionalPolicies like idle-gate-qitem.
+  "silence-classifier",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */
