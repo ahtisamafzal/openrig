@@ -24,9 +24,20 @@ describe("seatProviderHealth", () => {
     const h = seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-29T12:00:00.000Z" })), SEAT, NOW);
     expect(h).toMatchObject({ verdict: "limited", limitedUntil: "2026-09-29T12:00:00.000Z", reasons: [] });
   });
-  it("fresh window below the limit, or already reset -> healthy", () => {
+  it("fresh window below the limit -> healthy", () => {
     expect(seatProviderHealth(model(sig({ usedPercent: 40 })), SEAT, NOW).verdict).toBe("healthy");
-    expect(seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-29T09:00:00.000Z" })), SEAT, NOW).verdict).toBe("healthy");
+  });
+  it("an exhausted window with a missing, malformed, passed or exactly-now reset is no authority -> unknown", () => {
+    for (const resetsAt of [undefined, "not-a-time", "2026-09-29T09:00:00.000Z", NOW]) {
+      expect(seatProviderHealth(model(sig({ usedPercent: 100, ...(resetsAt ? { resetsAt } : {}) })), SEAT, NOW).verdict, String(resetsAt)).toBe("unknown");
+    }
+  });
+  it("evidence from the future (clock skew / malformed producer) or with an unparsable asOf proves nothing", () => {
+    const future = seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-30T12:00:00.000Z", asOf: "2026-09-29T10:00:00.001Z", staleAfter: "2026-09-30T10:05:00.000Z" })), SEAT, NOW);
+    expect(future.verdict).toBe("unknown");
+    expect(future.evidence[0]!.refusals).toContain("future_as_of");
+    expect(seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-29T12:00:00.000Z", asOf: NOW })), SEAT, NOW).verdict).toBe("limited"); // asOf == now is fine
+    expect(seatProviderHealth(model(sig({ usedPercent: 40, asOf: "garbage" })), SEAT, NOW).evidence[0]!.refusals).toContain("unparsable_as_of");
   });
   it("stale, advisory or unknown evidence -> unknown, even when it says exhausted", () => {
     const stale = seatProviderHealth(model(sig({ usedPercent: 100, staleAfter: "2026-09-29T10:00:00.000Z" })), SEAT, NOW); // inclusive expiry

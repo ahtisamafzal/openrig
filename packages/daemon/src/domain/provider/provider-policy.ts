@@ -18,7 +18,11 @@ export type AutomationRefusal =
   | "not_allow_switch_decision"
   | "no_freshness_bound"
   | "unparsable_freshness_bound"
-  | "stale";
+  | "stale"
+  // 3.5: evidence must already have happened — an unparsable or future `asOf` (clock skew, a
+  // malformed producer) cannot prove anything about now
+  | "unparsable_as_of"
+  | "future_as_of";
 
 export interface AutomationEligibility {
   eligible: boolean;
@@ -52,6 +56,13 @@ export function signalEligibleForAutomation(
       // Fail-closed: an unparsable `now`, or reaching/passing the bound, is stale.
       if (Number.isNaN(nowMs) || nowMs >= staleMs) refusals.push("stale");
     }
+  }
+
+  const asOfMs = Date.parse(signal.asOf);
+  if (Number.isNaN(asOfMs)) refusals.push("unparsable_as_of");
+  else {
+    const nowMs = Date.parse(nowIso);
+    if (Number.isNaN(nowMs) || asOfMs > nowMs) refusals.push("future_as_of");
   }
 
   return { eligible: refusals.length === 0, refusals };
@@ -119,17 +130,20 @@ export function seatProviderHealth(model: HealthModel, seat: string, nowIso: str
     const reactive = s.sourceClass === "provider_event" && s.authority === "reactive_error";
     if (reactive && s.staleAfter && Date.parse(s.staleAfter) > nowMs) recentFailures++;
     if (!el.eligible) continue;
-    eligibleCount++;
     let until: string | undefined;
     if (reactive) {
       until = s.staleAfter; // at-limit exhaustion, known only until the event goes stale
     } else if (typeof s.usedPercent === "number" && s.usedPercent >= 100) {
+      // an exhausted window is authority only with a parseable reset still ahead; a missing,
+      // malformed or passed reset says nothing either way (never limited, never healthy)
       const resetMs = s.resetsAt ? Date.parse(s.resetsAt) : NaN;
-      if (s.resetsAt && !Number.isNaN(resetMs) && resetMs <= nowMs) continue; // window already reset
-      until = s.resetsAt && !Number.isNaN(resetMs) ? s.resetsAt : s.staleAfter;
+      if (Number.isNaN(resetMs) || resetMs <= nowMs) continue;
+      until = s.resetsAt;
     } else {
+      eligibleCount++; // fresh, below the limit
       continue;
     }
+    eligibleCount++;
     limited = true;
     if (until && (!limitedUntil || Date.parse(until) > Date.parse(limitedUntil))) limitedUntil = until;
   }
