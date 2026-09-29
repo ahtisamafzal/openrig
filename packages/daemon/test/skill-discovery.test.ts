@@ -55,7 +55,7 @@ afterEach(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-function pathsFor(runtime: "claude-code" | "codex"): SkillDiscoveryPaths {
+function pathsFor(runtime: "claude-code" | "codex" | "pi"): SkillDiscoveryPaths {
   return { runtime, homedir, cwd, specInstallDir };
 }
 
@@ -235,5 +235,18 @@ describe("parseSkillFrontmatter — Windows line endings", () => {
     const result = parseSkillFrontmatter(crlf);
     expect(result).toMatchObject({ ok: true });
     if (result.ok) expect(result.frontmatter.name).toBe("banner-design");
+  });
+});
+
+describe("discoverSkillsForRuntime — pi sees only rig-bundled sources and the managed catalog", () => {
+  it("never resolves a skill found only in codex's .agents libraries (project or user)", () => {
+    writeSkill(join(cwd, ".agents/skills/codex-project-only"), { name: "codex-project-only", description: "Codex project skill" });
+    writeSkill(join(homedir, ".agents/skills/codex-user-only"), { name: "codex-user-only", description: "Codex user skill" });
+    writeSkill(join(homedir, ".openrig/skills/managed-one"), { name: "managed-one", description: "Managed catalog skill" });
+    writeSkill(join(specInstallDir, "skills/bundled-one"), { name: "bundled-one", description: "Rig-bundled skill" });
+    const ids = discoverSkillsForRuntime(pathsFor("pi")).skills.map((s) => s.id).sort();
+    expect(ids).toEqual(["bundled-one", "managed-one"]);
+    // codex still sees its own libraries
+    expect(discoverSkillsForRuntime(pathsFor("codex")).skills.map((s) => s.id)).toContain("codex-user-only");
   });
 });

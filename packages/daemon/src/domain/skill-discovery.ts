@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillResource } from "./types.js";
 
-export type SkillRuntime = "claude-code" | "codex";
+export type SkillRuntime = "claude-code" | "codex" | "pi";
 
 export interface SkillDiscoveryPaths {
   runtime: SkillRuntime;
@@ -194,6 +194,14 @@ export function discoverSkillsForRuntime(paths: SkillDiscoveryPaths): SkillDisco
  *  cross-runtime one. */
 function listScanRoots(paths: SkillDiscoveryPaths): string[] {
   const { runtime, homedir, cwd, specInstallDir } = paths;
+  // pi has no project/user skill library of its own: it sees only rig-bundled sources and the
+  // managed catalog — never Codex's .agents libraries, which are Codex-specific installs.
+  if (runtime === "pi") {
+    return [
+      ...(specInstallDir ? [join(specInstallDir, "skills")] : []),
+      paths.skillsRoot ?? join(homedir, ".openrig", "skills"),
+    ];
+  }
   const runtimeDir = runtime === "claude-code" ? ".claude" : ".agents";
   const roots: string[] = [];
 

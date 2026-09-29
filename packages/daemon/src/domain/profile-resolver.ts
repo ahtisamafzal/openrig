@@ -156,8 +156,8 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // skill-discovery.listScanRoots; here we only enforce that
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
-  // pi discovers like codex (the runtime-neutral .agents roots plus the managed catalog), so a pi
-  // seat can select catalog-managed skills exactly as claude/codex seats can.
+  // pi discovers from rig-bundled sources and the managed catalog only (skill-discovery excludes
+  // the codex .agents libraries for pi), so a pi seat can select catalog-managed skills.
   if (runtime === "claude-code" || runtime === "codex" || runtime === "pi") {
     const discovery = discoverSkillsForRuntime({
       runtime: runtime as SkillRuntime,
