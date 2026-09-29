@@ -205,8 +205,9 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const log = opts.log ?? (() => {});
   const cfg = loadConfig(opts.home);
   const envFile = cfg.secretsEnvFile ?? undefined;
-  const bot = resolveSecret(SECRET_BOT, { envFile });
-  const app = resolveSecret(SECRET_APP, { envFile });
+  const onRefused = (why: string) => log(`slack secrets env file refused: ${why}`);
+  const bot = resolveSecret(SECRET_BOT, { envFile, onRefused });
+  const app = resolveSecret(SECRET_APP, { envFile, onRefused });
 
   const outboundReady = cfg.enabled && bot !== null && cfg.channel !== null;
   const inboundReady = cfg.enabled && app !== null;

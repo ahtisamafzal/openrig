@@ -41,10 +41,17 @@ export function readConnectionConfiguration(home: string) {
     bot = resolveSecret("SLACK_BOT_TOKEN", { envFile: cfg?.secretsEnvFile ?? undefined });
     app = resolveSecret("SLACK_APP_TOKEN", { envFile: cfg?.secretsEnvFile ?? undefined });
   } catch { secretsAvailable = false; }
+  // 5.2: a Windows env file refused for its ACL is not USED, but its values must still be redacted
+  // from this display surface (read here for redaction only, never returned)
+  const refused: Array<string | null> = [];
+  try {
+    const envFile = cfg?.secretsEnvFile ?? undefined;
+    if (envFile) for (const name of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) refused.push(resolveSecret(name, { envFile, env: {}, platform: "linux" }));
+  } catch { /* unreadable: nothing further to redact */ }
   const text = (v: unknown): string | null => {
     if (typeof v !== "string") return null;
     let result = v;
-    for (const value of [bot, app]) if (value) result = result.split(value).join("[redacted]");
+    for (const value of [bot, app, ...refused]) if (value) result = result.split(value).join("[redacted]");
     return result.replace(/[\x00-\x1f\x7f]/g, " ");
   };
   return { cfg, configPath, configState, sourceState, fields, bot, app, secretsAvailable, text };

@@ -11,7 +11,7 @@ export interface TelegramUpdate {
     chat?: { id: number; type?: string };
     text?: string;
     message_thread_id?: number;
-    reply_to_message?: { message_id: number };
+    reply_to_message?: { message_id: number; text?: string; from?: { id: number; is_bot?: boolean } };
   };
 }
 

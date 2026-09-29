@@ -9,6 +9,7 @@
 // exhausts in the same breath, and no digest/deferral machinery exists.
 // Every section below fails at base for exactly those reasons.
 
+import { restrictToCurrentUser } from "./helpers/secret-file.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -311,6 +312,7 @@ describe("OPR.0.5.6.1 §3 — the gateway consults the engine before dispatch", 
     const registry = registryWith(prefs);
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     return buildSlackGatewayWire({
       home,
@@ -452,6 +454,7 @@ describe("OPR.0.5.6.1 §4 — the C/D digest flush (v3: transport truth first, r
     const registry = registryWith({ deliveryClass: "C", availability: "available" });
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     return buildSlackGatewayWire({
       home,
@@ -922,6 +925,7 @@ describe("OPR.0.5.6.1 §8 — the production composition is live (R2 B-1/B-2/B-3
     const registry = registryWith(prefs);
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     return buildSlackGatewayWire({
       home,

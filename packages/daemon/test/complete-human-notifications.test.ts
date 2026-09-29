@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -130,6 +131,8 @@ describe("complete human notifications", () => {
   it("runs queue→wire→complete quiet multipart delivery→done and bounded Feed history without a human decision", async () => {
     const item = await repo.create({ ...request, humanIntent: "update", body: "The release is ready. No action needed.", humanDetail: "Known limit: this is synthetic delivery proof.", tags: ["escalation"] });
     const secrets = join(home, "fake.env"); writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n");
+    // 5.2: on Windows the env file must be readable by the current user only (temp dirs often grant more)
+    if (process.platform === "win32") execFileSync("icacls", [secrets, "/inheritance:r", "/grant:r", `${process.env.USERNAME}:F`], { windowsHide: true, stdio: "ignore" });
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-TEST", secretsEnvFile: secrets, minimumLevelThatInterrupts: "NOTICE" }, home);
     const posts: Array<Record<string, unknown>> = [];
     const wire = buildSlackGatewayWire({ home, queueRepo: repo, registry: { loadHumanRegistry: () => registry, resolveSlackHandle }, fetchImpl: async (_url, init) => { posts.push(JSON.parse(String(init?.body))); return reply({ ok: true, ts: `${posts.length}.1` }); } });

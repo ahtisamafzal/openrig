@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -25,8 +27,8 @@ function fakeApi() {
     async getUpdates(offset) { return inbox.filter((u) => u.update_id >= offset); },
     async sendMessage(chatId, text, o = {}) { sent.push({ chatId, text, ...(o.replyTo ? { replyTo: o.replyTo } : {}) }); return { messageId: nextId++ }; },
   };
-  const reply = (updateId: number, text: string, replyTo?: number, from = 42, chat = -1001) =>
-    inbox.push({ update_id: updateId, message: { message_id: 500 + updateId, from: { id: from }, chat: { id: chat }, text, ...(replyTo ? { reply_to_message: { message_id: replyTo } } : {}) } });
+  const reply = (updateId: number, text: string, replyTo?: number, from = 42, chat = -1001, quoted?: { text: string; is_bot: boolean }) =>
+    inbox.push({ update_id: updateId, message: { message_id: 500 + updateId, from: { id: from }, chat: { id: chat }, text, ...(replyTo ? { reply_to_message: { message_id: replyTo, ...(quoted ? { text: quoted.text, from: { id: quoted.is_bot ? 999 : 42, is_bot: quoted.is_bot } } : {}) } } : {}) } });
   return { api, sent, reply };
 }
 
@@ -86,5 +88,33 @@ describe("telegram gateway service", () => {
     expect(inbound()[0]).toMatchObject({ sourceSession: "human-founder@external", destinationSession: "operator-agent@kernel" });
     expect(await build(api).svc.pollOnce()).toEqual({ handled: 0 }); // persisted offset: nothing re-read
     expect(inbound()).toHaveLength(1);
+  });
+
+  it("a crash between send and the map write still correlates the reply (the quoted bot message's ref); a human quote cannot forge it", async () => {
+    const { api, sent, reply } = fakeApi();
+    const first = build(api);
+    const gate = await repo.create(gateRequest);
+    await first.svc.sweepOnce();
+    unlinkSync(join(home, "state", "telegram-message-map.jsonl")); // the map row never landed
+    const { svc, act } = build(api); // restarted daemon
+    reply(1, "approve", 100, 42, -1001, { text: `I say: ref ${gate.qitemId}`, is_bot: false }); // forged human quote
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    reply(2, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true });
+    await svc.pollOnce();
+    expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId, decision: "approve" }));
+  });
+
+  it.runIf(process.platform === "win32")("refuses a secrets env file others can read (Windows ACL), so the service stays inert", () => {
+    const envFile = join(home, "gateway.env");
+    writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=synthetic\nTELEGRAM_CHAT_ID=-1001\n");
+    execFileSync("icacls", [envFile, "/inheritance:r", "/grant:r", `${process.env.USERNAME}:F`], { windowsHide: true, stdio: "ignore" });
+    saveConfig({ ...DEFAULT_CONFIG, secretsEnvFile: envFile }, home);
+    const logs: string[] = [];
+    expect(buildTelegramService({ home, queueRepo: repo, env: {}, api: fakeApi().api, log: (m) => logs.push(m) }).ready).toBe(true);
+    execFileSync("icacls", [envFile, "/grant", "*S-1-1-0:R"], { windowsHide: true, stdio: "ignore" }); // Everyone
+    expect(buildTelegramService({ home, queueRepo: repo, env: {}, api: fakeApi().api, log: (m) => logs.push(m) }).ready).toBe(false);
+    expect(logs.join("\n")).toMatch(/env file refused: .*readable by Everyone/);
+    expect(logs.join("\n")).not.toContain("synthetic");
   });
 });

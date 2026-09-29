@@ -104,7 +104,7 @@ function render(item: QueueItem): string {
 export function buildTelegramService(opts: TelegramServiceOpts): TelegramService {
   const log = opts.log ?? (() => {});
   const cfg = loadConfig(opts.home);
-  const lookup = { envFile: cfg.secretsEnvFile ?? undefined, ...(opts.env ? { env: opts.env } : {}) };
+  const lookup = { envFile: cfg.secretsEnvFile ?? undefined, ...(opts.env ? { env: opts.env } : {}), onRefused: (why: string) => log(`telegram secrets env file refused: ${why}`) };
   const token = resolveSecret(SECRET_TELEGRAM_TOKEN, lookup);
   const chatIds = parseIds(resolveSecret(SECRET_TELEGRAM_CHAT, lookup) ?? undefined);
   const postChat = [...chatIds][0];
@@ -139,7 +139,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     // anything else is an unrouted signal to the inbound destination (never guessed)
     resolveRoute: (ev) => {
       const [chat, replyTo] = [Number(ev.channel), Number(ev.thread_ts)];
-      const hit = ev.thread_ts ? messages.get(chat, replyTo) : undefined;
+      const hit = ev.thread_ts ? (messages.get(chat, replyTo) ?? refFromReply.get(ev.ts ?? "")) : undefined;
       return hit
         ? { destination: hit.seat, tags: ["founder-telegram", "inbound", "thread", `reply-to:${hit.qitemId}`], correlationQitemId: hit.qitemId }
         : { destination: cfg.inboundDestination, tags: ["founder-telegram", "inbound", "unrouted-signal"] };
@@ -147,6 +147,25 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     resolveHumanReply: opts.resolveHumanReply,
     log,
   });
+
+  // A crash between sendMessage and the map write leaves no map row; the reply still quotes our own
+  // message, whose last line is `ref <qitemId>`. It is used only when that qitem exists and names the
+  // replying human (validated below), and routes to the qitem's asking seat.
+  const refFromReply = new Map<string, { qitemId: string; seat: string }>();
+  const refOf = (botText: string | undefined, sender: string): { qitemId: string; seat: string } | undefined => {
+    const id = botText ? /(?:^|\n)ref (\S+)\s*$/.exec(botText)?.[1] : undefined;
+    const q = id ? opts.queueRepo.getById(id) : undefined;
+    if (!q) return undefined;
+    const reg = registry();
+    if (!reg.ok) return undefined;
+    const human = resolveSlackHandle(sender, reg.entities, "telegram");
+    if (human.kind !== "registered") return undefined;
+    const local = human.address.split("@")[0];
+    const names = (s: string | null | undefined) => (s ?? "").split("@")[0] === local;
+    if (names(q.destinationSession)) return { qitemId: q.qitemId, seat: q.sourceSession };
+    if (names(q.blockedOn)) return { qitemId: q.qitemId, seat: q.destinationSession };
+    return undefined;
+  };
 
   const humanOf = (item: QueueItem, entities: readonly HumanFragment[]) =>
     entities.find((e) => e.entityId === (item.destinationSession ?? "").split("@")[0]);
@@ -197,7 +216,9 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       const p = parseTelegramUpdate(u, allow);
       if (p.ok) {
         const ev: SlackEvent = { type: "message", user: String(p.userId), text: p.text, ts: `tg-${p.updateId}`, channel: String(p.chatId), ...(p.replyToMessageId ? { thread_ts: String(p.replyToMessageId) } : {}) };
-        const r = await router.route(ev);
+        const ref = refOf(p.replyToBotText, String(p.userId));
+        if (ref) refFromReply.set(ev.ts!, ref);
+        const r = await router.route(ev).finally(() => refFromReply.delete(ev.ts!));
         if (r.replyResolution === "invalid-decision") {
           await api.sendMessage(p.chatId, "Not recorded as a decision. Reply with: approve / revise <direction> / reject", { replyTo: p.messageId }).catch(() => undefined);
         }

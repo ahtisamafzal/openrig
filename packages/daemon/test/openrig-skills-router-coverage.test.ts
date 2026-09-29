@@ -1,3 +1,4 @@
+import { restrictToCurrentUser } from "./helpers/secret-file.js";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -209,6 +210,7 @@ describe("S22 OpenRig skill router coverage", () => {
 
       const secrets = join(home, "slack.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+      restrictToCurrentUser(secrets);
       saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
       const posts: Array<Record<string, unknown>> = [];
       const wire = buildSlackGatewayWire({

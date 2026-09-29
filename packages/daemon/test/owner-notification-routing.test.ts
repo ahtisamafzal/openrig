@@ -1,3 +1,4 @@
+import { restrictToCurrentUser } from "./helpers/secret-file.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -268,6 +269,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
 
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     const posts: Array<Record<string, unknown>> = [];
     const wire = buildSlackGatewayWire({
@@ -343,6 +345,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
 
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     let postCalls = 0;
     const fetchImpl = async (url: string | URL) => {
@@ -420,6 +423,7 @@ describe("S14 owner notifications — system notices, not remembered tags", () =
 
     const secrets = join(home, "slack.env");
     writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\n", { mode: 0o600 });
+    restrictToCurrentUser(secrets);
     saveConfig({ ...DEFAULT_CONFIG, enabled: true, channel: "C-OWNER", secretsEnvFile: secrets }, home);
     let postCalls = 0;
     let landedText = "";

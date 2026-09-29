@@ -60,9 +60,9 @@ describe("Slice-11 secrets — resolution + hygiene (item 7 + 10)", () => {
   it("resolveSecret: env var wins; env-file fallback; null when unset", () => {
     const fsops: SecretFsOps = { readFileSync: () => "SLACK_WEBHOOK_URL=https://from-file", statMode: () => 0o600 };
     // env var precedence
-    expect(resolveSecret("SLACK_WEBHOOK_URL", { env: { SLACK_WEBHOOK_URL: "https://from-env" }, envFile: "/x", fsops })).toBe("https://from-env");
+    expect(resolveSecret("SLACK_WEBHOOK_URL", { env: { SLACK_WEBHOOK_URL: "https://from-env" }, envFile: "/x", fsops, platform: "linux" })).toBe("https://from-env");
     // env-file fallback
-    expect(resolveSecret("SLACK_WEBHOOK_URL", { env: {}, envFile: "/x", fsops })).toBe("https://from-file");
+    expect(resolveSecret("SLACK_WEBHOOK_URL", { env: {}, envFile: "/x", fsops, platform: "linux" })).toBe("https://from-file");
     // B4: the NORMAL OPENRIG_SLACK_* alias (OPENRIG_ + name) resolves
     expect(resolveSecret("SLACK_APP_TOKEN", { env: { OPENRIG_SLACK_APP_TOKEN: "xapp-EXAMPLE-fake" } })).toBe("xapp-EXAMPLE-fake");
     expect(resolveSecret("SLACK_WEBHOOK_URL", { env: { OPENRIG_SLACK_WEBHOOK_URL: "https://from-alias" } })).toBe("https://from-alias");

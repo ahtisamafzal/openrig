@@ -78,6 +78,9 @@ export interface SecretLookupOpts {
   envFile?: string; // path to the 0600 env file (optional)
   env?: NodeJS.ProcessEnv; // process env (default process.env)
   fsops?: SecretFsOps;
+  /** Told why the env file was refused (never the secret). */
+  onRefused?: (why: string) => void;
+  platform?: NodeJS.Platform;
 }
 
 /** Warn if the env file is group/world readable (item 10 hygiene). Returns a warning string or null. */
@@ -111,6 +114,15 @@ export function resolveSecret(name: string, opts: SecretLookupOpts = {}): string
     if (env[k]) return env[k]!;
   }
   if (opts.envFile) {
+    // 5.2: on Windows an env file others can read (or whose ACL cannot be read) is refused, not used
+    const platform = opts.platform ?? process.platform;
+    if (platform === "win32") {
+      const problem = checkEnvFilePermissions(opts.envFile, fsops, platform);
+      if (problem) {
+        opts.onRefused?.(problem);
+        return null;
+      }
+    }
     try {
       const map = parseEnvFile(fsops.readFileSync(opts.envFile));
       if (map[name]) return map[name];

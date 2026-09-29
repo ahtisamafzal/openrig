@@ -8,9 +8,10 @@ import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsys
 describe("gate decision vocabulary", () => {
   it("parses the allowed words (+ direction) and nothing else", () => {
     expect(parseGateDecision("approve")).toEqual({ decision: "approve" });
-    expect(parseGateDecision("  Approved: ship it")).toEqual({ decision: "approve", direction: "ship it" });
+    expect(parseGateDecision("  Approve: ship it")).toEqual({ decision: "approve", direction: "ship it" });
     expect(parseGateDecision("revise - add the rollback section")).toEqual({ decision: "revise", direction: "add the rollback section" });
-    expect(parseGateDecision("denied")).toEqual({ decision: "reject" });
+    expect(parseGateDecision("reject too risky")).toEqual({ decision: "reject", direction: "too risky" });
+    for (const synonym of ["approved", "Approved: ship it", "rejected", "deny", "denied", "ok", "yes"]) expect(parseGateDecision(synonym)).toBeNull();
     expect(parseGateDecision("looks good to me")).toBeNull();
     expect(parseGateDecision("approvement pending")).toBeNull();
     expect(isGateItem(["arete-gate", "workflow:bugfix"])).toBe(true);
