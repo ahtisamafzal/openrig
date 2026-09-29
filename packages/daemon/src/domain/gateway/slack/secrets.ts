@@ -7,10 +7,36 @@
 // The env file lives on the TRUSTED host (item 10 secret-host axis); it may be
 // a different host from the queue/alert host.
 import fs from "node:fs";
+import os from "node:os";
+import { execFileSync } from "node:child_process";
 
 export interface SecretFsOps {
   readFileSync(p: string): string;
   statMode(p: string): number | null; // octal perm bits, or null if absent
+  /** 5.2 Windows: principals other than the current user / SYSTEM / Administrators that can read
+   *  the file (from its ACL), or null when not applicable (POSIX) or the ACL cannot be read. */
+  aclReaders?(p: string): string[] | null;
+}
+
+const ALWAYS_TRUSTED = new Set(["nt authority\\system", "builtin\\administrators"]);
+
+/** 5.2: parse `icacls <file>` output into the principals holding an allow-read grant, minus the
+ *  current user, SYSTEM and Administrators. Deny entries never grant. */
+export function parseIcaclsReaders(output: string, file: string, currentUser: string): string[] {
+  const readers = new Set<string>();
+  const me = currentUser.toLowerCase();
+  for (let line of output.split(/\r?\n/)) {
+    if (line.startsWith(file)) line = line.slice(file.length);
+    const m = /^\s*(.+?):((?:\([^)]*\))+)\s*$/.exec(line);
+    if (!m) continue;
+    const principal = m[1]!.trim();
+    const perms = m[2]!.toUpperCase();
+    if (/\(DENY\)/.test(perms) || !/\((?:F|M|RX|R|GR|GA|GE)\)|\([^)]*\bRD\b[^)]*\)/.test(perms)) continue;
+    const lower = principal.toLowerCase();
+    if (ALWAYS_TRUSTED.has(lower) || lower === me || lower.endsWith(`\\${me}`)) continue;
+    readers.add(principal);
+  }
+  return [...readers];
 }
 
 export const nodeSecretFs: SecretFsOps = {
@@ -18,6 +44,15 @@ export const nodeSecretFs: SecretFsOps = {
   statMode: (p) => {
     try {
       return fs.statSync(p).mode & 0o777;
+    } catch {
+      return null;
+    }
+  },
+  aclReaders: (p) => {
+    if (process.platform !== "win32") return null;
+    try {
+      const out = execFileSync("icacls", [p], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      return parseIcaclsReaders(out, p, os.userInfo().username);
     } catch {
       return null;
     }
@@ -46,9 +81,16 @@ export interface SecretLookupOpts {
 }
 
 /** Warn if the env file is group/world readable (item 10 hygiene). Returns a warning string or null. */
-export function checkEnvFilePermissions(envFile: string, fsops: SecretFsOps = nodeSecretFs): string | null {
+export function checkEnvFilePermissions(envFile: string, fsops: SecretFsOps = nodeSecretFs, platform: NodeJS.Platform = process.platform): string | null {
   const mode = fsops.statMode(envFile);
   if (mode === null) return null; // absent — a separate "unconfigured" concern
+  // 5.2: Windows mode bits are synthetic (always 0666/0444); the ACL is what decides who reads it
+  if (platform === "win32") {
+    const readers = fsops.aclReaders?.(envFile);
+    if (readers === null || readers === undefined) return `secret env file ${envFile}: its access list could not be read — restrict it to the current user: icacls "${envFile}" /inheritance:r /grant:r "%USERNAME%:F"`;
+    if (readers.length) return `secret env file ${envFile} is readable by ${readers.join(", ")} — restrict it to the current user: icacls "${envFile}" /inheritance:r /grant:r "%USERNAME%:F"`;
+    return null;
+  }
   if (mode & 0o077) return `secret env file ${envFile} is mode ${mode.toString(8)} — should be 0600 (group/other must not read secrets)`;
   return null;
 }
