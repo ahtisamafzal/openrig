@@ -117,9 +117,27 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // promoted rung authority. Optional in the deps contract; ALWAYS wired here.
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
   });
+  // Roadmap 3.3 — optional idempotency key: a caller retrying the same decided handover (e.g. after
+  // a restart) gets the completed one back instead of a second handover. The key rides in the
+  // persisted reason; a completed handover carrying it is the receipt.
+  const rawKey = body["idempotencyKey"];
+  const idempotencyKey = typeof rawKey === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(rawKey) ? rawKey : null;
+  if (rawKey !== undefined && !idempotencyKey) return c.json({ ok: false, code: "invalid_idempotency_key", message: "idempotencyKey must be 1-128 of [A-Za-z0-9._:-]" }, 400);
+  const marker = idempotencyKey ? `[idempotency-key:${idempotencyKey}]` : null;
+  if (marker && body["dryRun"] !== true) {
+    const done = rigRepo.db
+      .prepare(`SELECT payload FROM events WHERE type = 'seat.handover_completed' AND instr(json_extract(payload, '$.reason'), ?) > 0 ORDER BY seq DESC LIMIT 1`)
+      .get(marker) as { payload: string } | undefined;
+    if (done) {
+      const e = JSON.parse(done.payload) as Record<string, unknown>;
+      return c.json({ ok: true, idempotentReplay: true, previousOccupant: e["previousOccupant"], currentOccupant: e["currentOccupant"], source: e["source"] });
+    }
+  }
+  // ponytail: check-then-handover — two concurrent requests with one key could both hand over;
+  // the one caller (Arete's recovery loop) is sequential per step.
   const result = await service.handover({
     seatRef: decodeURIComponent(c.req.param("seatRef")!),
-    reason: typeof body["reason"] === "string" ? body["reason"] : null,
+    reason: typeof body["reason"] === "string" ? (marker ? `${body["reason"]} ${marker}` : body["reason"]) : marker,
     source: typeof body["source"] === "string" ? body["source"] : null,
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
     dryRun: body["dryRun"] === true,

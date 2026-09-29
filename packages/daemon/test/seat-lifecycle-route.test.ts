@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { SeatHandoverService } from "../src/domain/seat-handover-service.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
@@ -158,6 +159,20 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       recovery: null,
     });
     expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh" });
+  });
+
+  it("3.3: a handover with an idempotency key already completed returns that handover, never a second one", async () => {
+    const handover = vi.spyOn(SeatHandoverService.prototype, "handover");
+    setup.db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (NULL, NULL, 'seat.handover_completed', ?)").run(JSON.stringify({
+      type: "seat.handover_completed", reason: "Arete recovery (context limit): x [idempotency-key:arete-recovery-abc]",
+      previousOccupant: "old@seat-rig", currentOccupant: "new@seat-rig", source: "fresh",
+    }));
+    const res = await post("handover", "dev-impl@seat-rig", { reason: "again", source: "fresh", idempotencyKey: "arete-recovery-abc" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, idempotentReplay: true, currentOccupant: "new@seat-rig" });
+    expect(handover).not.toHaveBeenCalled();
+    const bad = await post("handover", "dev-impl@seat-rig", { reason: "x", idempotencyKey: "has spaces" });
+    expect(bad.status).toBe(400);
   });
 
   it("3.2: the launch route passes the TRANSPORT caller and the recovery evidence; a refusal is 403", async () => {
