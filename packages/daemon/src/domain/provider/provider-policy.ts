@@ -139,8 +139,9 @@ export function seatProviderHealth(model: HealthModel, seat: string, nowIso: str
       // an exhausted window is authority only with a parseable reset still ahead; a missing,
       // malformed or passed reset says nothing either way (never limited, never healthy)
       const resetMs = s.resetsAt ? Date.parse(s.resetsAt) : NaN;
+      if (!Number.isNaN(resetMs) && resetMs <= nowMs && Date.parse(s.asOf) < resetMs) continue; // sampled before a reset that has since happened: that window is over
       if (Number.isNaN(resetMs) || resetMs <= nowMs) {
-        indeterminate = true;
+        indeterminate = true; // no reset, a malformed one, or exhausted even after its reset: unprovable
         continue;
       }
       until = s.resetsAt;

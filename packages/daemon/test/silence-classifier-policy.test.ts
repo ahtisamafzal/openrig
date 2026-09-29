@@ -314,9 +314,13 @@ describe("provider evidence -> health", () => {
   const now = () => Date.parse("2026-09-29T10:00:00.000Z");
   it("a FRESH exhausted window (not yet reset) on the seat's account is rate_limit; otherwise healthy", async () => {
     expect(await providerHealthFrom(model(100, "2026-09-29T12:00:00.000Z"), { now })(SEAT)).toMatchObject({ lastFailureClass: "rate_limit" });
-    expect(await providerHealthFrom(model(100, "2026-09-29T09:00:00.000Z"), { now })(SEAT)).toEqual(HEALTHY); // already reset
+    expect(await providerHealthFrom(model(100, "2026-09-29T09:59:30.000Z"), { now })(SEAT)).toEqual(HEALTHY); // sampled before a reset that has since passed
     expect(await providerHealthFrom(model(80), { now })(SEAT)).toEqual(HEALTHY);
     expect(await providerHealthFrom(model(100), { now })("other@rig")).toEqual(HEALTHY);
+  });
+  it("a fresh exhausted window whose reset cannot be proven still pauses (never a nudge)", async () => {
+    expect(await providerHealthFrom(model(100), { now })(SEAT)).toMatchObject({ lastFailureClass: "rate_limit" });
+    expect(await providerHealthFrom(model(100, "not-a-time"), { now })(SEAT)).toMatchObject({ lastFailureClass: "rate_limit" });
   });
   it("stale or advisory limit evidence is not a limit (the shared 3.5 eligibility)", async () => {
     expect(await providerHealthFrom(model(100, "2026-09-29T12:00:00.000Z", { staleAfter: "2026-09-29T09:30:00.000Z" }), { now })(SEAT)).toEqual(HEALTHY);

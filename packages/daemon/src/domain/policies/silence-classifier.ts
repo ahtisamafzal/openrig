@@ -192,7 +192,10 @@ export function providerHealthFrom(
       throw err;
     });
     const h = seatProviderHealth(model, seat, new Date(now()).toISOString());
-    return h.verdict === "limited"
+    // an exhausted window whose reset cannot be proven is not a reason to nudge an idle seat either:
+    // it pauses like a limit (the seat may well be rate-limited), it just never justifies a switch
+    const exhausted = h.verdict === "limited" || h.reasons.includes("exhausted_window_without_future_reset");
+    return exhausted
       ? { recentFailureCount: Math.max(1, h.recentFailures), permanentlyUnhealthy: false, lastFailureClass: "rate_limit" }
       : HEALTHY;
   };

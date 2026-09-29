@@ -27,7 +27,10 @@ describe("seatProviderHealth", () => {
   it("fresh window below the limit -> healthy", () => {
     expect(seatProviderHealth(model(sig({ usedPercent: 40 })), SEAT, NOW).verdict).toBe("healthy");
   });
-  it("an exhausted window with a missing, malformed, passed or exactly-now reset is no authority -> unknown", () => {
+  it("an exhausted window sampled before a reset that has since passed is over (no authority either way)", () => {
+    expect(seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-29T09:59:30.000Z" })), SEAT, NOW)).toMatchObject({ verdict: "unknown", reasons: ["no_fresh_eligible_evidence"] });
+  });
+  it("an exhausted window with a missing, malformed, or at/after-sample reset is no authority -> unknown", () => {
     for (const resetsAt of [undefined, "not-a-time", "2026-09-29T09:00:00.000Z", NOW]) {
       expect(seatProviderHealth(model(sig({ usedPercent: 100, ...(resetsAt ? { resetsAt } : {}) })), SEAT, NOW).verdict, String(resetsAt)).toBe("unknown");
     }
