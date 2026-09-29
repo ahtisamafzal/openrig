@@ -17,6 +17,7 @@ import {
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { withMsysParents } from "./msys-parents.js";
+import { listCodexSeatRoots } from "../adapters/codex-seat-home.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -355,11 +356,21 @@ export function windowsCensusRows(stdout: string): WindowsProcessRow[] {
   return rows;
 }
 
+// One census at a time: a Windows census is a PowerShell/CIM spawn (seconds), and parallel
+// callers (refresher, lineage proofs, activity) each spawning one saturated the CPU and the
+// daemon's event loop (healthz >1s). Concurrent callers share the in-flight census (a
+// joiner's view can predate its request by one census, a few seconds — the same staleness
+// any census has by the time it returns); nothing is cached after it settles.
+let windowsCensusInFlight: Promise<WindowsProcessRow[]> | null = null;
+
 export async function listWindowsProcesses(): Promise<WindowsProcessRow[]> {
+  if (windowsCensusInFlight) return windowsCensusInFlight;
   const snapshot = async () => windowsCensusRows(await runAsyncSite("resume_metadata.list_processes", async () =>
     (await execFileAsync("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_PROCESS_QUERY], { encoding: "utf-8", maxBuffer: 16 * 1024 * 1024, windowsHide: true })).stdout));
   // Git Bash fork/exec leaves seat harnesses with dead Windows parents; lineage needs MSYS's.
-  return withMsysParents(snapshot, (r) => (r.startedAt ? new Date(r.startedAt) : undefined));
+  windowsCensusInFlight = withMsysParents(snapshot, (r) => (r.startedAt ? new Date(r.startedAt) : undefined))
+    .finally(() => { windowsCensusInFlight = null; });
+  return windowsCensusInFlight;
 }
 
 /** OPR.0.5.3.10 r2-B2 — the STRICT production lister: a failed `ps` spawn
@@ -426,7 +437,7 @@ function readCodexThreadIdFromLogs(
   resolvedHome: string | undefined,
   homeDir: string
 ): string | undefined {
-  return readCodexThreadIdFromCandidateHomes(pid, [resolvedHome, homeDir, os.homedir()]);
+  return readCodexThreadIdFromCandidateHomes(pid, [resolvedHome, homeDir, os.homedir(), ...listCodexSeatRoots()]);
 }
 
 function commandLooksLikeCodex(command: string): boolean {

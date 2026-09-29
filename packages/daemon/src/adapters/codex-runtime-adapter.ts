@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
 import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
-import { INHERITED_CODEX_KEYS, INHERITED_CODEX_TABLES, codexHomeOf, codexSeatEnvPrefix, codexSeatRoot, extractTomlTable, extractTopLevelKeys, linkCodexAuth, upsertTomlTable, upsertTopLevelKeys } from "./codex-seat-home.js";
+import { INHERITED_CODEX_KEYS, INHERITED_CODEX_TABLES, codexHomeOf, codexSeatEnvPrefix, codexSeatRoot, extractTomlTable, extractTopLevelKeys, linkCodexAuth, listCodexSeatRoots, resumeCodexSeatRoot, upsertTomlTable, upsertTopLevelKeys } from "./codex-seat-home.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -70,8 +70,6 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private codexHome?: string;
   /** Set while config writers target one seat's own Codex home (roadmap 1.12). */
   private configRootOverride: string | null = null;
-  /** Seat roots prepared by this daemon: extra homes for thread-id log lookup. */
-  private readonly seatRoots = new Set<string>();
   private launchPath?: string;
   // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
   // the Codex profile-LOAD probe is an injectable dep in the adapter's
@@ -333,9 +331,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
 
+    // A seat that ran isolated must resume from its own home; with isolation on and that home
+    // gone, refuse rather than resume against the global home (roadmap 1.12).
+    if (opts.resumeToken) {
+      const resumeRoot = resumeCodexSeatRoot(binding.tmuxSession);
+      if (resumeRoot && "missing" in resumeRoot) {
+        return { ok: false, error: `Isolated Codex home ${resumeRoot.missing} is missing; refusing to resume this seat against the global home`, recovery: "attention_required" };
+      }
+    }
     let seatRoot: string | null;
     try {
-      seatRoot = this.prepareSeatCodexHome(binding.tmuxSession, binding.cwd ?? null);
+      seatRoot = this.prepareSeatCodexHome(binding.tmuxSession, binding.cwd ?? null, binding.codexConfigProfile?.trim() || undefined);
     } catch (err) {
       return { ok: false, error: `Isolated Codex home could not be prepared (OPENRIG_CODEX_SEAT_HOME): ${(err as Error).message}` };
     }
@@ -726,7 +732,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * cwd and a symlink to the operator's auth; nothing from the global config.toml, so no
    * global MCP server or plugin starts in the seat. null = isolation off.
    */
-  private prepareSeatCodexHome(sessionName: string, cwd: string | null): string | null {
+  private prepareSeatCodexHome(sessionName: string, cwd: string | null, profile?: string): string | null {
     const root = codexSeatRoot(sessionName);
     if (!root) return null;
     const seatHome = codexHomeOf(root);
@@ -745,10 +751,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const table = extractTomlTable(globalContent, name);
         if (table) content = upsertTomlTable(content, name, table);
       }
+      // A profile-bound seat launches with -p <profile>: the seat home must carry it.
+      if (profile) {
+        const table = extractTomlTable(globalContent, `profiles.${profile}`);
+        if (!table) throw new Error(`Codex profile "${profile}" is not defined in ${globalConfig}`);
+        content = upsertTomlTable(content, `profiles.${profile}`, table);
+      }
       this.fs.mkdirp(nodePath.dirname(seatConfig));
       this.fs.writeFile(seatConfig, content);
     });
-    this.seatRoots.add(root);
     return root;
   }
 
@@ -919,7 +930,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      [...this.seatRoots, await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      [...listCodexSeatRoots(), await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
       (path) => this.fs.exists(path)
     );
   }

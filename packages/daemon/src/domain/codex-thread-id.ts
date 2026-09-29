@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Database from "better-sqlite3";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { listCodexSeatRoots } from "../adapters/codex-seat-home.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -150,6 +151,12 @@ export class CodexThreadIdResolver {
     // 1. Default home: no subprocess.
     const fromDefault = readFromLogs(pid, defaultHome);
     if (fromDefault) return fromDefault;
+    // 1b. Isolated seat homes (roadmap 1.12), found on disk so a restarted daemon still sees
+    //     them: Windows cannot read another process's HOME/CODEX_HOME. Same identity gate.
+    for (const root of listCodexSeatRoots()) {
+      const fromSeat = readFromLogs(pid, root);
+      if (fromSeat) return fromSeat;
+    }
 
     // 2. FRESH cached home for this (pid, identity): no subprocess. A reused
     //    pid carries a new identity and structurally MISSES here (r1's

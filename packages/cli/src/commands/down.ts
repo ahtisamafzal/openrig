@@ -15,7 +15,9 @@ interface TeardownResult {
   errors: string[];
 }
 
-const LONG_RUNNING_TIMEOUT_MS = 45_000;
+// Teardown snapshots the rig and stops every seat gracefully; on Windows (herdr, taskkill,
+// PowerShell process census) a three-seat rig measured ~46-60s, past the old 45s.
+const LONG_RUNNING_TIMEOUT_MS = 180_000;
 
 interface RigSummaryEntry {
   id: string;

@@ -5,8 +5,7 @@ import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
-import { existsSync } from "node:fs";
-import { codexHomeOf, codexSeatEnvPrefix, codexSeatRoot } from "./codex-seat-home.js";
+import { codexSeatEnvPrefix, resumeCodexSeatRoot } from "./codex-seat-home.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 
@@ -95,9 +94,13 @@ export class CodexResumeAdapter {
       daemonSupport?.kind === "supported",
     );
 
-    // Roadmap 1.12: a seat that ran with its own Codex home resumes from it (its rollouts live there).
-    const seatRoot = codexSeatRoot(tmuxSessionName);
-    const codexEnv = seatRoot && existsSync(codexHomeOf(seatRoot)) ? codexSeatEnvPrefix(seatRoot) : "";
+    // Roadmap 1.12: a seat that ran with its own Codex home resumes from it (its rollouts live
+    // there); with isolation on and the home gone, refuse instead of using the global home.
+    const seatRoot = resumeCodexSeatRoot(tmuxSessionName);
+    if (seatRoot && "missing" in seatRoot) {
+      return { ok: false, code: "resume_failed", message: `Isolated Codex home ${seatRoot.missing} is missing; refusing to resume against the global home` };
+    }
+    const codexEnv = seatRoot ? codexSeatEnvPrefix(seatRoot.root) : "";
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath
       ? `env PATH=${shellQuote(this.options.launchPath)} ${codexEnv}${cmd}` : `${codexEnv}${cmd}`);
     if (!textResult.ok) {
