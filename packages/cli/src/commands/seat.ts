@@ -415,6 +415,8 @@ Examples:
     const res = await client.post<Record<string, unknown>>(
       `/api/seat/${path}/${encodeURIComponent(seat)}`,
       body,
+      // launch/stop start or stop a harness (boot, graceful exit): not a 5s call.
+      path === "launch" || path === "stop" ? { timeoutMs: HANDOVER_TIMEOUT_MS } : undefined,
     );
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
