@@ -12,6 +12,7 @@
 // the relay's history IS the subsystem's history — enabling the subsystem replays nothing the
 // relay already delivered (the enable-time backlog rule survives the cutover by construction).
 
+import { isGateItem, parseGateDecision } from "../gate-decision.js";
 import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import fs from "node:fs";
@@ -62,7 +63,7 @@ export interface SlackWireOpts {
   inboundRetryIntervalMs?: number;
   inboundMaxConnects?: number;
   registry?: RegistrySurface;
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable" | "invalid-decision">;
 }
 
 interface HumanReplyActionPort {
@@ -77,8 +78,12 @@ export function makeHumanReplyResolver(
   contract: HumanReplyActionPort | undefined,
 ): NonNullable<SlackWireOpts["resolveHumanReply"]> {
   return async (input) => {
-    if (queueRepo.getById(input.qitemId)?.humanIntent === "update") return "not-applicable";
+    const target = queueRepo.getById(input.qitemId);
+    if (target?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
+    // 5.1: an Arete approval gate accepts only approve / revise / reject (any channel); anything else
+    // never resolves it — the reply still lands as its own item, the gate keeps waiting
+    if (isGateItem(target?.tags) && !parseGateDecision(input.decision)) return "invalid-decision";
     try {
       await contract.act({ verb: "resolve", ...input });
       return "resolved";

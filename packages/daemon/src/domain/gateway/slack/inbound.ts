@@ -95,7 +95,7 @@ export interface InboundDeps {
    *  shape, and the fallback the tests pin). */
   resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string };
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
-  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable" | "invalid-decision">;
   /** OPR.0.5.6.2 — inbound file transfer. Absent with a file-bearing event →
    *  every file is a NAMED failure on the row ("transfer unavailable"), never
    *  a silent drop of message or file. */
@@ -152,7 +152,7 @@ export class InboundRouter {
     qitemId?: string;
     reason?: "dup" | "create_failed" | "resolve_failed" | "unregistered";
     correlationQitemId?: string;
-    replyResolution?: "resolved" | "already-resolved" | "not-applicable";
+    replyResolution?: "resolved" | "already-resolved" | "not-applicable" | "invalid-decision";
   }> {
     const ts = ev.ts ?? "";
     if (!ts || this.inflight.has(ts) || this.deps.seen.load().has(ts)) return { landed: false, reason: "dup" };
@@ -212,7 +212,7 @@ export class InboundRouter {
         this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
         return { landed: false, reason: "create_failed" };
       }
-      let replyResolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
+      let replyResolution: "resolved" | "already-resolved" | "not-applicable" | "invalid-decision" | undefined;
       if (route.correlationQitemId && this.deps.resolveHumanReply) {
         try {
           replyResolution = await this.deps.resolveHumanReply({
@@ -243,7 +243,7 @@ export class InboundRouter {
     disposition: "accepted" | "ignored" | "refused" | "dead-lettered";
     reason?: string;
     correlationQitemId?: string;
-    replyResolution?: "resolved" | "already-resolved" | "not-applicable";
+    replyResolution?: "resolved" | "already-resolved" | "not-applicable" | "invalid-decision";
   }> {
     const r = await this.attemptLand(ev);
     if (!r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed")) {
