@@ -16,6 +16,7 @@ import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
+import { fsSafeName } from "./fs-safe-name.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -500,11 +501,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
     switch (entry.category) {
-      case "skill": return nodePath.join(cwd, ".claude", "skills", entry.effectiveId);
+      case "skill": return nodePath.join(cwd, ".claude", "skills", fsSafeName(entry.effectiveId));
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".claude", "agents");
-      case "plugin": return nodePath.join(cwd, ".claude", "plugins", entry.effectiveId);
-      case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", entry.effectiveId);
+      case "plugin": return nodePath.join(cwd, ".claude", "plugins", fsSafeName(entry.effectiveId));
+      case "runtime_resource": return nodePath.join(cwd, ".claude", "extensions", fsSafeName(entry.effectiveId));
       default: return null;
     }
   }

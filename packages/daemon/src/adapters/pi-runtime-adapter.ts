@@ -28,6 +28,7 @@ import {
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
   type PiRunnerState,
 } from "./pi-runner-protocol.js";
+import { fsSafeName } from "./fs-safe-name.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
@@ -386,7 +387,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "skill") {
       if (!binding.tmuxSession) return false;
       const { agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
-      const targetDir = nodePath.join(agentDir, "skills", entry.effectiveId);
+      const targetDir = nodePath.join(agentDir, "skills", fsSafeName(entry.effectiveId));
       this.fs.mkdirp(targetDir);
       const isDir = this.fs.listFiles ? this.fs.listFiles(entry.absolutePath).length > 0 : false;
       if (isDir && this.fs.listFiles) {

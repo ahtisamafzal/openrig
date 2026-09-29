@@ -5,6 +5,8 @@ import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
+import { existsSync } from "node:fs";
+import { codexHomeOf, codexSeatEnvPrefix, codexSeatRoot } from "./codex-seat-home.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 
@@ -93,8 +95,11 @@ export class CodexResumeAdapter {
       daemonSupport?.kind === "supported",
     );
 
+    // Roadmap 1.12: a seat that ran with its own Codex home resumes from it (its rollouts live there).
+    const seatRoot = codexSeatRoot(tmuxSessionName);
+    const codexEnv = seatRoot && existsSync(codexHomeOf(seatRoot)) ? codexSeatEnvPrefix(seatRoot) : "";
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath
-      ? `env PATH=${shellQuote(this.options.launchPath)} ${cmd}` : cmd);
+      ? `env PATH=${shellQuote(this.options.launchPath)} ${codexEnv}${cmd}` : `${codexEnv}${cmd}`);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }

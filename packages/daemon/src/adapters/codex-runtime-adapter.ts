@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
 import { codexPostureArg, codexSeatEnvArg } from "./yolo-mode.js";
+import { INHERITED_CODEX_KEYS, INHERITED_CODEX_TABLES, codexHomeOf, codexSeatEnvPrefix, codexSeatRoot, extractTomlTable, extractTopLevelKeys, linkCodexAuth, upsertTomlTable, upsertTopLevelKeys } from "./codex-seat-home.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   InstalledResource, ProjectionResult, StartupDeliveryResult, ReadinessResult,
@@ -30,6 +31,7 @@ import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 
 import { listNativeProcesses, observeCodexPaneProcess, type NativeProcessRow } from "../domain/native-process-lineage.js";
+import { fsSafeName } from "./fs-safe-name.js";
 
 // Shared by all probes of ONE launch, never reset by a delayed screen or an
 // ambiguous transport result. A separately requested launch gets a new attempt.
@@ -66,6 +68,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
   private codexHome?: string;
+  /** Set while config writers target one seat's own Codex home (roadmap 1.12). */
+  private configRootOverride: string | null = null;
+  /** Seat roots prepared by this daemon: extra homes for thread-id log lookup. */
+  private readonly seatRoots = new Set<string>();
   private launchPath?: string;
   // Housekeeping B1 fixback (guard-blocking, arch HK-AR-1 = whole-probe DI):
   // the Codex profile-LOAD probe is an injectable dep in the adapter's
@@ -252,7 +258,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd);
+        const seatRoot = binding.tmuxSession ? codexSeatRoot(binding.tmuxSession) : null;
+        const didProject = this.withConfigRoot(seatRoot ? codexHomeOf(seatRoot) : null, () => this.projectEntry(entry, binding.cwd));
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -326,6 +333,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       return { ok: false, error: "resumeToken and forkSource are mutually exclusive — pick one" };
     }
 
+    let seatRoot: string | null;
+    try {
+      seatRoot = this.prepareSeatCodexHome(binding.tmuxSession, binding.cwd ?? null);
+    } catch (err) {
+      return { ok: false, error: `Isolated Codex home could not be prepared (OPENRIG_CODEX_SEAT_HOME): ${(err as Error).message}` };
+    }
+    const codexEnv = seatRoot ? codexSeatEnvPrefix(seatRoot) : "";
+
     const updatePrompt: UpdatePromptAttempt = { handled: false };
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
@@ -378,7 +393,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       const cmd = `codex${daemonArg}${launchArgs}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
-      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
+      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${codexEnv}${cmd}` : `${codexEnv}${cmd}`);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -404,7 +419,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, launchArgs, daemonOptOut)
       : `codex${daemonArg}${launchArgs} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
-    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
+    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${codexEnv}${cmd}` : `${codexEnv}${cmd}`);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -608,11 +623,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   private resolveTargetDir(entry: ProjectionEntry, cwd: string): string | null {
     switch (entry.category) {
-      case "skill": return nodePath.join(cwd, ".agents", "skills", entry.effectiveId);
+      case "skill": return nodePath.join(cwd, ".agents", "skills", fsSafeName(entry.effectiveId));
       case "guidance": return null; // handled via merge
       case "subagent": return nodePath.join(cwd, ".agents"); // .agents/{id}.yaml per preserved contract
-      case "plugin": return nodePath.join(cwd, ".codex", "plugins", entry.effectiveId);
-      case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", entry.effectiveId);
+      case "plugin": return nodePath.join(cwd, ".codex", "plugins", fsSafeName(entry.effectiveId));
+      case "runtime_resource": return nodePath.join(cwd, ".agents", "extensions", fsSafeName(entry.effectiveId));
       default: return null;
     }
   }
@@ -687,9 +702,54 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   }
 
   private resolveCodexConfigPath(): string {
-    const root = this.codexHome
+    const root = this.configRootOverride
+      ?? this.codexHome
       ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
     return nodePath.join(root, "config.toml");
+  }
+
+  /** Run config writers against a seat's own Codex home instead of the global one. */
+  private withConfigRoot<T>(codexHome: string | null, fn: () => T): T {
+    if (!codexHome) return fn();
+    const previous = this.configRootOverride;
+    this.configRootOverride = codexHome;
+    try {
+      return fn();
+    } finally {
+      this.configRootOverride = previous;
+    }
+  }
+
+  /**
+   * Roadmap 1.12: build the seat's isolated Codex home (codex-seat-home.ts). It gets the
+   * OpenRig activity hooks (only when the operator runs them globally), trust for the seat
+   * cwd and a symlink to the operator's auth; nothing from the global config.toml, so no
+   * global MCP server or plugin starts in the seat. null = isolation off.
+   */
+  private prepareSeatCodexHome(sessionName: string, cwd: string | null): string | null {
+    const root = codexSeatRoot(sessionName);
+    if (!root) return null;
+    const seatHome = codexHomeOf(root);
+    const globalHome = this.codexHome ?? nodePath.join(this.fs.homedir ?? os.homedir(), ".codex");
+    linkCodexAuth(globalHome, seatHome);
+    const globalConfig = nodePath.join(globalHome, "config.toml");
+    const globalContent = this.fs.exists(globalConfig) ? this.fs.readFile(globalConfig) : "";
+    const hooksOn = globalContent.includes(OPENRIG_ACTIVITY_HOOKS_BEGIN);
+    this.withConfigRoot(seatHome, () => {
+      if (hooksOn) this.ensureCodexActivityHooks();
+      this.provisionWorkspaceTrust(cwd);
+      const seatConfig = this.resolveCodexConfigPath();
+      let content = this.fs.exists(seatConfig) ? this.fs.readFile(seatConfig) : "";
+      content = upsertTopLevelKeys(content, extractTopLevelKeys(globalContent, INHERITED_CODEX_KEYS));
+      for (const name of INHERITED_CODEX_TABLES) {
+        const table = extractTomlTable(globalContent, name);
+        if (table) content = upsertTomlTable(content, name, table);
+      }
+      this.fs.mkdirp(nodePath.dirname(seatConfig));
+      this.fs.writeFile(seatConfig, content);
+    });
+    this.seatRoots.add(root);
+    return root;
   }
 
   private readJsonObject(path: string): Record<string, unknown> {
@@ -859,7 +919,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      [...this.seatRoots, await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
       (path) => this.fs.exists(path)
     );
   }

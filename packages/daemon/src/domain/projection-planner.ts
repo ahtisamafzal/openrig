@@ -6,6 +6,7 @@ import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from ".
 import type { ResourceCollision } from "./agent-resolver.js";
 import type { ResolvedStartupFile } from "./runtime-adapter.js";
 import { DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "./managed-blocks.js";
+import { fsSafeName } from "../adapters/fs-safe-name.js";
 
 // -- Types --
 
@@ -297,7 +298,7 @@ export function claudeConflictTargetPath(
 ): string | null {
   switch (category) {
     case "skill":
-      return nodePath.join(cwd, ".claude", "skills", effectiveId, "SKILL.md");
+      return nodePath.join(cwd, ".claude", "skills", fsSafeName(effectiveId), "SKILL.md");
     case "subagent":
       return sourcePath ? nodePath.join(cwd, ".claude", "agents", nodePath.basename(sourcePath)) : null;
     case "guidance":

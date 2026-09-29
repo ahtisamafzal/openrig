@@ -29,6 +29,7 @@ import {
   stubSeatSidecarPath, buildStubRunnerCommand, parseStubRunnerState,
   type StubRunnerState,
 } from "./stub-runner-protocol.js";
+import { fsSafeName } from "./fs-safe-name.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
@@ -291,7 +292,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath));
     }
     if (entry.category === "skill") {
-      const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", entry.effectiveId);
+      const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", fsSafeName(entry.effectiveId));
       this.fsOps.mkdirp(targetDir);
       const isDir = this.fsOps.listFiles ? this.fsOps.listFiles(entry.absolutePath).length > 0 : false;
       if (isDir && this.fsOps.listFiles) {
