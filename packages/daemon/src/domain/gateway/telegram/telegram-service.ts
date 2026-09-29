@@ -23,7 +23,7 @@ import { isGateItem } from "../gate-decision.js";
 import type { QueueRepository } from "../../queue-repository.js";
 import { telegramApi, type TelegramApi, type FetchImpl } from "./api.js";
 import { parseIds, parseTelegramUpdate } from "./inbound.js";
-import { splitMessage } from "./split.js";
+import { splitMessage, TELEGRAM_LIMIT } from "./split.js";
 
 export const SECRET_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN";
 export const SECRET_TELEGRAM_CHAT = "TELEGRAM_CHAT_ID";
@@ -92,13 +92,15 @@ function writeOffset(file: string, offset: number): void {
 const telegramHandles = (entities: readonly HumanFragment[]): Set<number> =>
   parseIds(entities.flatMap((e) => e.connectorBindings.filter((b) => b.kind === "telegram" && b.handle).map((b) => b.handle!)).join(","));
 
-function render(item: QueueItem): string {
+/** The message parts; EVERY part ends with `ref <qitemId>`, so a reply to any part (the root
+ *  included) can be correlated even when its map row was lost. */
+function renderParts(item: QueueItem): string[] {
   const lines = [item.summary ?? "(no summary)"];
   if (item.body) lines.push("", item.body);
   if (item.humanDetail) lines.push("", item.humanDetail);
   if (isGateItem(item.tags)) lines.push("", "Reply to this message with: approve / revise <direction> / reject");
-  lines.push("", `ref ${item.qitemId}`);
-  return lines.join("\n");
+  const ref = `\n\nref ${item.qitemId}`;
+  return splitMessage(lines.join("\n"), TELEGRAM_LIMIT - ref.length).map((part) => part + ref);
 }
 
 export function buildTelegramService(opts: TelegramServiceOpts): TelegramService {
@@ -139,7 +141,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     // anything else is an unrouted signal to the inbound destination (never guessed)
     resolveRoute: (ev) => {
       const [chat, replyTo] = [Number(ev.channel), Number(ev.thread_ts)];
-      const hit = ev.thread_ts ? (messages.get(chat, replyTo) ?? refFromReply.get(ev.ts ?? "")) : undefined;
+      const mapped = ev.thread_ts ? messages.get(chat, replyTo) : undefined;
+      // BOTH correlation paths require the replier to be the human the qitem is assigned to: in a
+      // shared chat one registered human must never resolve another human's gate
+      if (mapped && !ownedBy(mapped.qitemId, ev.user ?? "")) log(`telegram reply by ${ev.user} to ${mapped.qitemId} refused: not that item's human`);
+      const hit = (mapped && ownedBy(mapped.qitemId, ev.user ?? "") ? mapped : undefined) ?? refFromReply.get(ev.ts ?? "");
       return hit
         ? { destination: hit.seat, tags: ["founder-telegram", "inbound", "thread", `reply-to:${hit.qitemId}`], correlationQitemId: hit.qitemId }
         : { destination: cfg.inboundDestination, tags: ["founder-telegram", "inbound", "unrouted-signal"] };
@@ -154,7 +160,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const refFromReply = new Map<string, { qitemId: string; seat: string }>();
   const refOf = (botText: string | undefined, sender: string): { qitemId: string; seat: string } | undefined => {
     const id = botText ? /(?:^|\n)ref (\S+)\s*$/.exec(botText)?.[1] : undefined;
-    const q = id ? opts.queueRepo.getById(id) : undefined;
+    return id ? ownedBy(id, sender) : undefined;
+  };
+  /** The qitem and its asking seat when `sender` (a Telegram user id) is the human it is assigned to. */
+  function ownedBy(qitemId: string, sender: string): { qitemId: string; seat: string } | undefined {
+    const q = opts.queueRepo.getById(qitemId);
     if (!q) return undefined;
     const reg = registry();
     if (!reg.ok) return undefined;
@@ -165,7 +175,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     if (names(q.destinationSession)) return { qitemId: q.qitemId, seat: q.sourceSession };
     if (names(q.blockedOn)) return { qitemId: q.qitemId, seat: q.destinationSession };
     return undefined;
-  };
+  }
 
   const humanOf = (item: QueueItem, entities: readonly HumanFragment[]) =>
     entities.find((e) => e.entityId === (item.destinationSession ?? "").split("@")[0]);
@@ -192,7 +202,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       if (d.deferMinutes !== undefined) continue;
       try {
         let root: number | undefined;
-        for (const part of splitMessage(render(item))) {
+        for (const part of renderParts(item)) {
           const { messageId } = await api.sendMessage(postChat!, part, root ? { replyTo: root } : {});
           root ??= messageId;
           messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);

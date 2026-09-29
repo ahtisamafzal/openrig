@@ -105,6 +105,39 @@ describe("telegram gateway service", () => {
     expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId, decision: "approve" }));
   });
 
+  it("in a shared chat one registered human cannot resolve another human's gate", async () => {
+    const two = { ok: true as const, entities: [...registry.entities, { ...registry.entities[0]!, entityId: "human-other", displayName: "Other", address: "human-other@external", connectorBindings: [{ ...registry.entities[0]!.connectorBindings[0]!, handle: "43" }] }] };
+    const shared = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: () => two });
+    const { api, reply } = fakeApi();
+    const act = vi.fn(async () => ({}));
+    const svc = buildTelegramService({ home, queueRepo: shared, env, api, loadRegistry: () => two as never, resolveHumanReply: makeHumanReplyResolver(shared, { act }) });
+    const gate = await shared.create(gateRequest); // assigned to human-founder (Telegram user 42)
+    await svc.sweepOnce();
+    reply(1, "approve", 100, 43); // human-other replies in the same allowed chat
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    reply(2, "approve", 100, 42);
+    await svc.pollOnce();
+    expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId }));
+  });
+
+  it("a long notification: every part carries the ref, so a reply to the ROOT recovers without the map", async () => {
+    const { api, sent, reply } = fakeApi();
+    const first = build(api);
+    const gate = await repo.create({ ...gateRequest, body: "detail ".repeat(1200) }); // > 4096 UTF-16 units
+    await first.svc.sweepOnce();
+    expect(sent.length).toBeGreaterThan(1);
+    for (const part of sent) {
+      expect(part.text.length).toBeLessThanOrEqual(4096);
+      expect(part.text.endsWith(`ref ${gate.qitemId}`)).toBe(true);
+    }
+    unlinkSync(join(home, "state", "telegram-message-map.jsonl"));
+    const { svc, act } = build(api);
+    reply(1, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true });
+    await svc.pollOnce();
+    expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId }));
+  });
+
   it.runIf(process.platform === "win32")("refuses a secrets env file others can read (Windows ACL), so the service stays inert", () => {
     const envFile = join(home, "gateway.env");
     writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=synthetic\nTELEGRAM_CHAT_ID=-1001\n");
