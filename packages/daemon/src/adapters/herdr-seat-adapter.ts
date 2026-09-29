@@ -111,21 +111,29 @@ export function handleBoundKillScript(pid: number, started: string): string {
   ].join("; ");
 }
 
-// One table at a time: each is a PowerShell/CIM + ps spawn (seconds), and every seat
-// check (command, activity, stop) asked for its own, so under load they overlapped and
-// piled up. Concurrent callers share the in-flight table; nothing is cached after it settles.
-const processTableInFlight = new Map<string, Promise<ProcessRow[]>>();
+// One census at a time: each is a PowerShell/CIM + ps spawn (seconds), and every seat
+// check (command, activity, stop) ran its own, so under load they overlapped and piled
+// up. A caller never receives a census that began reading before it asked (a harness
+// started a moment ago must not read as absent): whoever arrives mid-census waits, and
+// all of them share the NEXT census. Nothing is cached after a census settles.
+const censuses = new Map<string, { running: Promise<ProcessRow[]> | null; queued: Promise<ProcessRow[]> | null }>();
 
 /** Windows processes, with parents corrected from MSYS ps when Git Bash is present. */
 export function defaultProcessTable(msysPs: string, readCim = cimProcessTable): Promise<ProcessRow[]> {
-  let table = processTableInFlight.get(msysPs);
-  if (!table) {
-    table = withMsysParents(readCim, (r) => (r.started ? new Date(r.started) : undefined), async () =>
+  let s = censuses.get(msysPs);
+  if (!s) censuses.set(msysPs, (s = { running: null, queued: null }));
+  const state = s;
+  const run = (): Promise<ProcessRow[]> => {
+    const census: Promise<ProcessRow[]> = withMsysParents(readCim, (r) => (r.started ? new Date(r.started) : undefined), async () =>
       (await execFileAsync(msysPs, ["-e"], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 })).stdout, { keepUnverified: true })
-      .finally(() => processTableInFlight.delete(msysPs));
-    processTableInFlight.set(msysPs, table);
-  }
-  return table;
+      .finally(() => { if (state.running === census) state.running = null; });
+    state.running = census;
+    return census;
+  };
+  if (state.queued) return state.queued; // its census has not started yet: it is fresh for us too
+  if (!state.running) return run();
+  state.queued = state.running.catch(() => undefined).then(() => { state.queued = null; return run(); });
+  return state.queued;
 }
 
 interface HerdrPaneInfo {

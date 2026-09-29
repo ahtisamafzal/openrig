@@ -114,17 +114,33 @@ describe("withMsysParents: pid reused WHILE ps runs", () => {
   });
 });
 
-describe("herdr seat process table: concurrent checks share one census", () => {
-  it("overlapping callers get the same table from ONE CIM read; the next call reads fresh", async () => {
+describe("herdr seat process table: one census at a time, never older than the request", () => {
+  it("a caller arriving mid-census gets the NEXT census (sees a harness started meanwhile); late callers share it", async () => {
     const { defaultProcessTable } = await import("../src/adapters/herdr-seat-adapter.js");
     let reads = 0;
-    const readCim = async () => { reads++; await new Promise((r) => setTimeout(r, 30)); return [{ pid: 1, ppid: 0, name: "x" }]; };
+    let harnessRunning = false; // the process state the census observes
+    let running = 0, maxRunning = 0;
+    const readCim = async () => {
+      reads++;
+      running++; maxRunning = Math.max(maxRunning, running);
+      const rows = [{ pid: 1, ppid: 0, name: "bash.exe" }, ...(harnessRunning ? [{ pid: 2, ppid: 1, name: "claude.exe" }] : [])];
+      await new Promise((r) => setTimeout(r, 30));
+      running--;
+      return rows;
+    };
     const noPs = "Z:/no/such/ps.exe";
-    const [a, b, c] = await Promise.all([defaultProcessTable(noPs, readCim), defaultProcessTable(noPs, readCim), defaultProcessTable(noPs, readCim)]);
-    expect(reads).toBe(1);
-    expect(a).toBe(b);
-    expect(b).toBe(c);
+    const first = defaultProcessTable(noPs, readCim); // census A starts: no harness yet
+    await new Promise((r) => setTimeout(r, 5));
+    harnessRunning = true; // harness starts after A captured its snapshot
+    const late = [defaultProcessTable(noPs, readCim), defaultProcessTable(noPs, readCim)];
+    const a = await first;
+    const [b1, b2] = await Promise.all(late);
+    expect(a.some((r) => r.pid === 2)).toBe(false);
+    expect(b1.some((r) => r.pid === 2)).toBe(true); // never handed the stale census
+    expect(b1).toBe(b2); // late callers share ONE next census
+    expect(reads).toBe(2);
+    expect(maxRunning).toBe(1); // never two censuses at once
     await defaultProcessTable(noPs, readCim);
-    expect(reads).toBe(2); // nothing cached after it settles
+    expect(reads).toBe(3); // nothing cached after it settles
   });
 });
