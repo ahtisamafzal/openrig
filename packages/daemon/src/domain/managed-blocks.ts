@@ -42,9 +42,13 @@ export function mergeManagedBlock(
   const end = MANAGED_BLOCK_END(blockId);
   const block = `${begin}\n${content}\n${end}`;
 
+  // Every write ends with exactly one newline, so re-projecting the same block leaves the
+  // user's file byte-identical (it used to gain a blank line per re-merge).
+  const withEol = (text: string) => `${text.replace(/\n+$/, "")}\n`;
+
   if (!fs.exists(targetPath)) {
     fs.mkdirp?.(nodePath.dirname(targetPath));
-    fs.writeFile(targetPath, block);
+    fs.writeFile(targetPath, withEol(block));
     return;
   }
 
@@ -78,11 +82,11 @@ export function mergeManagedBlock(
     if (!updated.includes(begin) || !updated.includes(end)) {
       updated = `${updated.trim()}\n\n${block}`.trim();
     }
-    fs.writeFile(targetPath, `${updated}\n`);
+    fs.writeFile(targetPath, withEol(updated));
     return;
   }
 
-  fs.writeFile(targetPath, `${existing}\n\n${block}`);
+  fs.writeFile(targetPath, withEol(`${existing.replace(/\n+$/, "")}\n\n${block}`));
 }
 
 export function removeManagedBlocksFromFile(fs: ManagedBlockCleanupFsOps, targetPath: string): boolean {
