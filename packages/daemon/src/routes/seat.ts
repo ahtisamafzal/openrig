@@ -123,11 +123,20 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   const rawKey = body["idempotencyKey"];
   const idempotencyKey = typeof rawKey === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(rawKey) ? rawKey : null;
   if (rawKey !== undefined && !idempotencyKey) return c.json({ ok: false, code: "invalid_idempotency_key", message: "idempotencyKey must be 1-128 of [A-Za-z0-9._:-]" }, 400);
-  const marker = idempotencyKey ? `[idempotency-key:${idempotencyKey}]` : null;
+  // The receipt is scoped to the caller (its transport identity, else "operator") and, on lookup, to
+  // THIS seat's node: a key used by someone else, or on another seat, never replays here.
+  const keyOwner = c.req.header("x-openrig-session")?.trim() || "operator";
+  const marker = idempotencyKey ? `[idempotency-key:${keyOwner}/${idempotencyKey}]` : null;
   if (marker && body["dryRun"] !== true) {
-    const done = rigRepo.db
-      .prepare(`SELECT payload FROM events WHERE type = 'seat.handover_completed' AND instr(json_extract(payload, '$.reason'), ?) > 0 ORDER BY seq DESC LIMIT 1`)
-      .get(marker) as { payload: string } | undefined;
+    const status = new SeatStatusService({ rigRepo }).getStatus(decodeURIComponent(c.req.param("seatRef")!));
+    const nodeId = status.ok
+      ? rigRepo.getRig(status.status.rig_id)?.nodes.find((n) => n.logicalId === status.status.logical_id)?.id ?? null
+      : null;
+    const done = nodeId
+      ? (rigRepo.db
+          .prepare(`SELECT payload FROM events WHERE type = 'seat.handover_completed' AND node_id = ? AND instr(json_extract(payload, '$.reason'), ?) > 0 ORDER BY seq DESC LIMIT 1`)
+          .get(nodeId, marker) as { payload: string } | undefined)
+      : undefined;
     if (done) {
       const e = JSON.parse(done.payload) as Record<string, unknown>;
       return c.json({ ok: true, idempotentReplay: true, previousOccupant: e["previousOccupant"], currentOccupant: e["currentOccupant"], source: e["source"] });

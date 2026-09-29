@@ -161,16 +161,33 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh" });
   });
 
-  it("3.3: a handover with an idempotency key already completed returns that handover, never a second one", async () => {
-    const handover = vi.spyOn(SeatHandoverService.prototype, "handover");
-    setup.db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (NULL, NULL, 'seat.handover_completed', ?)").run(JSON.stringify({
-      type: "seat.handover_completed", reason: "Arete recovery (context limit): x [idempotency-key:arete-recovery-abc]",
-      previousOccupant: "old@seat-rig", currentOccupant: "new@seat-rig", source: "fresh",
-    }));
-    const res = await post("handover", "dev-impl@seat-rig", { reason: "again", source: "fresh", idempotencyKey: "arete-recovery-abc" });
+  it("3.3: a keyed handover already completed ON THIS SEAT by THIS caller replays; another seat or caller does not", async () => {
+    const { node, sessionName } = seedSeat();
+    const other = setup.rigRepo.addNode(node.rigId, "dev.other", { runtime: "claude-code" });
+    setup.sessionRegistry.registerSession(other.id, "dev-other@seat-rig");
+    const handover = vi.spyOn(SeatHandoverService.prototype, "handover").mockResolvedValue({ ok: false, code: "no_session", message: "stub" } as never);
+    const receipt = (nodeId: string, owner: string) =>
+      setup.db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (NULL, ?, 'seat.handover_completed', ?)").run(nodeId, JSON.stringify({
+        type: "seat.handover_completed", reason: `Arete recovery: x [idempotency-key:${owner}/arete-recovery-abc]`,
+        previousOccupant: "old@seat-rig", currentOccupant: "new@seat-rig", source: "fresh",
+      }));
+    const keyed = (seat: string, session = "arete@arete-rig") =>
+      setup.app.request(`/api/seat/handover/${encodeURIComponent(seat)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": session },
+        body: JSON.stringify({ reason: "again", source: "fresh", idempotencyKey: "arete-recovery-abc" }),
+      });
+    receipt(other.id, "arete@arete-rig"); // the same key completed on ANOTHER seat
+    await keyed(sessionName);
+    expect(handover).toHaveBeenCalledTimes(1); // not a replay: performed here
+    receipt(node.id, "someone@else"); // same key on this seat, but another caller's
+    await keyed(sessionName);
+    expect(handover).toHaveBeenCalledTimes(2);
+    receipt(node.id, "arete@arete-rig"); // this caller, this seat: replay
+    const res = await keyed(sessionName);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, idempotentReplay: true, currentOccupant: "new@seat-rig" });
-    expect(handover).not.toHaveBeenCalled();
+    expect(handover).toHaveBeenCalledTimes(2);
     const bad = await post("handover", "dev-impl@seat-rig", { reason: "x", idempotencyKey: "has spaces" });
     expect(bad.status).toBe(400);
   });
