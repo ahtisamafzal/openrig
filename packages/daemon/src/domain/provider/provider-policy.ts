@@ -113,6 +113,8 @@ export function seatProviderHealth(model: HealthModel, seat: string, nowIso: str
   let eligibleCount = 0;
   let limitedUntil: string | undefined;
   let limited = false;
+  // an eligible exhausted window whose recovery cannot be proven: the seat can never be `healthy`
+  let indeterminate = false;
   let recentFailures = 0;
   for (const s of relevant) {
     const el = signalEligibleForAutomation(s, nowIso);
@@ -137,7 +139,10 @@ export function seatProviderHealth(model: HealthModel, seat: string, nowIso: str
       // an exhausted window is authority only with a parseable reset still ahead; a missing,
       // malformed or passed reset says nothing either way (never limited, never healthy)
       const resetMs = s.resetsAt ? Date.parse(s.resetsAt) : NaN;
-      if (Number.isNaN(resetMs) || resetMs <= nowMs) continue;
+      if (Number.isNaN(resetMs) || resetMs <= nowMs) {
+        indeterminate = true;
+        continue;
+      }
       until = s.resetsAt;
     } else {
       eligibleCount++; // fresh, below the limit
@@ -147,8 +152,15 @@ export function seatProviderHealth(model: HealthModel, seat: string, nowIso: str
     limited = true;
     if (until && (!limitedUntil || Date.parse(until) > Date.parse(limitedUntil))) limitedUntil = until;
   }
-  const verdict: SeatHealthVerdict = limited ? "limited" : eligibleCount > 0 ? "healthy" : "unknown";
-  const reasons = verdict !== "unknown" ? [] : relevant.length === 0 ? ["no_signals"] : ["no_fresh_eligible_evidence"];
+  const verdict: SeatHealthVerdict = limited ? "limited" : !indeterminate && eligibleCount > 0 ? "healthy" : "unknown";
+  const reasons =
+    verdict !== "unknown"
+      ? []
+      : relevant.length === 0
+        ? ["no_signals"]
+        : indeterminate
+          ? ["exhausted_window_without_future_reset"]
+          : ["no_fresh_eligible_evidence"];
   return { seat, verdict, ...(limitedUntil ? { limitedUntil } : {}), reasons, recentFailures, evidence, asOf: nowIso };
 }
 

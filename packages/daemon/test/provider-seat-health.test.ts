@@ -32,6 +32,13 @@ describe("seatProviderHealth", () => {
       expect(seatProviderHealth(model(sig({ usedPercent: 100, ...(resetsAt ? { resetsAt } : {}) })), SEAT, NOW).verdict, String(resetsAt)).toBe("unknown");
     }
   });
+  it("an exhausted window without a provable reset is never masked by another healthy window", () => {
+    const h = seatProviderHealth(model(sig({ window: "primary", usedPercent: 100 }), sig({ window: "secondary", usedPercent: 40 })), SEAT, NOW);
+    expect(h).toMatchObject({ verdict: "unknown", reasons: ["exhausted_window_without_future_reset"] });
+    // a provable limit elsewhere still wins
+    const l = seatProviderHealth(model(sig({ usedPercent: 100 }), sig({ usedPercent: 100, resetsAt: "2026-09-29T12:00:00.000Z" })), SEAT, NOW);
+    expect(l.verdict).toBe("limited");
+  });
   it("evidence from the future (clock skew / malformed producer) or with an unparsable asOf proves nothing", () => {
     const future = seatProviderHealth(model(sig({ usedPercent: 100, resetsAt: "2026-09-30T12:00:00.000Z", asOf: "2026-09-29T10:00:00.001Z", staleAfter: "2026-09-30T10:05:00.000Z" })), SEAT, NOW);
     expect(future.verdict).toBe("unknown");
