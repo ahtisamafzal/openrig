@@ -24,7 +24,7 @@ import { parseSessionName } from "../session-name.js";
 
 // ── Schema (closed enums; extend only additively behind the contract) ──
 export const HUMAN_ENTITY_CLASSES = new Set(["human"]);          // M1's only class
-export const HUMAN_CONNECTOR_KINDS = new Set(["slack"]);          // M1's only kind
+export const HUMAN_CONNECTOR_KINDS = new Set(["slack", "telegram"]); // 5.1 adds telegram
 export const HUMAN_BINDING_ROLES = new Set(["primary", "secondary"]);
 export const HUMAN_DELIVERY_CLASSES = new Set(["A", "B", "C", "D"]);
 // entityId is the fragment key + filename: a stable slug that survives platform
@@ -54,7 +54,7 @@ function unknownKey(obj: Record<string, unknown>, allowed: Set<string>): string 
 }
 
 export interface HumanConnectorBinding {
-  kind: "slack";
+  kind: "slack" | "telegram";
   connectorRef: string;
   /** POINTER at the connector's vault (secrets-on-connector) — NEVER the secret. */
   secretsRef: string;
@@ -155,7 +155,7 @@ export function validateHumanFragment(raw: unknown): ValidateResult {
         return { ok: false, error: `connectorBindings[${i}].handle "${String(b.handle)}" must match ${HANDLE_PATTERN} (a platform id — no ':' '@' or whitespace, which could forge a ref)` };
       }
     }
-    const binding: HumanConnectorBinding = { kind: "slack", connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
+    const binding: HumanConnectorBinding = { kind: b.kind as HumanConnectorBinding["kind"], connectorRef: b.connectorRef, secretsRef: b.secretsRef, role: b.role as "primary" | "secondary" };
     if (b.handle !== undefined) { handle = b.handle as string; binding.handle = handle; }
     bindings.push(binding);
   }
@@ -301,7 +301,7 @@ export type SlackHandleResolution =
 export function resolveSlackHandle(
   handle: string,
   entities: readonly HumanFragment[],
-  connectorKind: "slack" = "slack",
+  connectorKind: HumanConnectorBinding["kind"] = "slack",
 ): SlackHandleResolution {
   for (const e of entities) {
     for (const b of e.connectorBindings) {

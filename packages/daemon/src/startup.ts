@@ -2341,14 +2341,25 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // no drivers) — `rig slack status` names what is missing.
   const { GatewaySubsystem } = await import("./domain/gateway/gateway-subsystem.js");
   const { buildSlackGatewayWire, makeHumanReplyResolver } = await import("./domain/gateway/slack/slack-subsystem.js");
+  const { buildTelegramService, withTelegram } = await import("./domain/gateway/telegram/telegram-service.js");
+  const humanReplyResolver = makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract);
   const gatewaySubsystem = new GatewaySubsystem({
     home: OPENRIG_HOME,
-    wire: () => buildSlackGatewayWire({
-      home: OPENRIG_HOME,
-      queueRepo: queueRepoInstance,
-      resolveHumanReply: makeHumanReplyResolver(queueRepoInstance, deps.missionControlWriteContract),
-      log: (m) => console.log(`[gateway] ${m}`),
-    }),
+    // 5.1: Telegram runs beside Slack on the same registry, admission and reply resolver
+    wire: () => withTelegram(
+      buildSlackGatewayWire({
+        home: OPENRIG_HOME,
+        queueRepo: queueRepoInstance,
+        resolveHumanReply: humanReplyResolver,
+        log: (m) => console.log(`[gateway] ${m}`),
+      }),
+      buildTelegramService({
+        home: OPENRIG_HOME,
+        queueRepo: queueRepoInstance,
+        resolveHumanReply: humanReplyResolver,
+        log: (m) => console.log(`[gateway:telegram] ${m}`),
+      }),
+    ),
     log: (m) => console.log(`[gateway] ${m}`),
   });
   gatewaySubsystem.start();

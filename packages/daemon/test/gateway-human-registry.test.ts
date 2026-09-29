@@ -46,7 +46,7 @@ describe("A3 human-fragment validation (add-time == load-time)", () => {
   });
 
   it("rejects an unknown connector kind (closed enum)", () => {
-    const r = validateHumanFragment({ ...fragment(), connectorBindings: [{ kind: "telegram", connectorRef: "x", secretsRef: "v", role: "primary" }] });
+    const r = validateHumanFragment({ ...fragment(), connectorBindings: [{ kind: "discord", connectorRef: "x", secretsRef: "v", role: "primary" }] });
     expect(r.ok).toBe(false);
   });
 
