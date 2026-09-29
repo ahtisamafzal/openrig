@@ -267,9 +267,12 @@ export function deriveUsageLimitPools(input: {
   const eligible = input.signals.filter(
     (signal) => signalEligibleForAutomation(signal, input.now.toISOString()).eligible,
   );
+  // 3.5 (shared with seatProviderHealth): a percentage-exhausted window is authority only with a
+  // parseable reset still ahead; the configured fallback duration applies only to fresh at-limit
+  // reactive events (which carry no reset).
   const exhausted = eligible.filter(
     (signal) =>
-      (typeof signal.usedPercent === "number" && signal.usedPercent >= 100) ||
+      (typeof signal.usedPercent === "number" && signal.usedPercent >= 100 && Date.parse(signal.resetsAt ?? "") > nowMs) ||
       (signal.sourceClass === "provider_event" && signal.authority === "reactive_error"),
   );
 

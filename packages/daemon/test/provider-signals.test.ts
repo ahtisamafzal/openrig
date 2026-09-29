@@ -166,6 +166,33 @@ describe("S16 usage-limit pool derivation", () => {
     ]);
   });
 
+  it("an exhausted window with a missing, malformed, passed or exactly-now reset parks nothing (3.5)", () => {
+    for (const resetsAt of [undefined, "not-a-time", "2026-08-28T11:00:00.000Z", NOW.toISOString()]) {
+      const pools = deriveUsageLimitPools({
+        now: NOW,
+        fallbackSeconds: 300,
+        bindings: [
+          { accountId: "acct-codex-1", seatSession: "dev-c@rig", rigName: "rig", boundAt: "2026-08-28T08:00:00.000Z", bindingSource: "fixture", anomalies: [] },
+        ],
+        signals: [
+          {
+            provider: "codex",
+            accountRef: "acct-codex-1",
+            sourceClass: "provider_structured_read",
+            authority: "account_cross_device",
+            window: "primary",
+            usedPercent: 100,
+            ...(resetsAt ? { resetsAt } : {}),
+            asOf: "2026-08-28T11:59:00.000Z",
+            staleAfter: "2026-08-28T12:05:00.000Z",
+            automationUse: "allow_switch_decision",
+          },
+        ],
+      });
+      expect(pools, String(resetsAt)).toEqual([]);
+    }
+  });
+
   it("never guesses usage-limit from unknown, advisory, stale, or already-expired evidence", () => {
     const pools = deriveUsageLimitPools({
       now: NOW,

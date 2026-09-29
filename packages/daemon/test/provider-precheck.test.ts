@@ -78,6 +78,20 @@ describe("precheckSwitch — §1 switch-safety gate", () => {
     if (!r.safe) expect(r.reasons).toContain("signal_unknown_or_stale");
   });
 
+  it("a future-dated or unparsable-asOf triggering signal is signal_unknown_or_stale (3.5)", () => {
+    for (const asOf of ["2026-08-03T12:00:00.001Z", "garbage"]) {
+      const r = precheckSwitch({
+        targetProvider: "codex",
+        targetAuthState: "active",
+        seatHasLiveConversation: false,
+        triggeringSignal: { ...FRESH_KNOWN_SIGNAL, asOf },
+        now: NOW,
+      });
+      expect(r.safe, asOf).toBe(false);
+      if (!r.safe) expect(r.reasons).toContain("signal_unknown_or_stale");
+    }
+  });
+
   it("an advisory (non-unknown, non-stale) triggering signal does NOT add signal_unknown_or_stale", () => {
     const advisory: ProviderSignal = { ...FRESH_KNOWN_SIGNAL, automationUse: "advisory_only" };
     const r = precheckSwitch({

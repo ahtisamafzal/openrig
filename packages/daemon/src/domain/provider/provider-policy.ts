@@ -165,6 +165,8 @@ const SIGNAL_UNKNOWN_OR_STALE_REFUSALS: readonly AutomationRefusal[] = [
   "no_freshness_bound",
   "unparsable_freshness_bound",
   "stale",
+  "unparsable_as_of",
+  "future_as_of",
 ];
 
 /** Fields common to a manual and an automated precheck. */
