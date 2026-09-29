@@ -37,6 +37,10 @@ seatRoutes.get("/status/:seatRef", (c) => {
   return c.json(result, 404);
 });
 
+/** Keyed handovers in progress (seat node + caller + key): a concurrent duplicate waits for the
+ *  first and gets its outcome instead of handing over again. */
+const inflightHandovers = new Map<string, Promise<Awaited<ReturnType<SeatHandoverService["handover"]>>>>();
+
 seatRoutes.post("/handover/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
@@ -127,6 +131,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
   // THIS seat's node: a key used by someone else, or on another seat, never replays here.
   const keyOwner = c.req.header("x-openrig-session")?.trim() || "operator";
   const marker = idempotencyKey ? `[idempotency-key:${keyOwner}/${idempotencyKey}]` : null;
+  let flightKey: string | null = null;
   if (marker && body["dryRun"] !== true) {
     const status = new SeatStatusService({ rigRepo }).getStatus(decodeURIComponent(c.req.param("seatRef")!));
     const nodeId = status.ok
@@ -141,16 +146,31 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
       const e = JSON.parse(done.payload) as Record<string, unknown>;
       return c.json({ ok: true, idempotentReplay: true, previousOccupant: e["previousOccupant"], currentOccupant: e["currentOccupant"], source: e["source"] });
     }
+    // Atomic with the receipt check above (no await in between, one daemon process): a concurrent
+    // duplicate of an in-flight handover waits for it and replays its outcome.
+    flightKey = `${nodeId ?? decodeURIComponent(c.req.param("seatRef")!)}|${marker}`;
+    const inflight = inflightHandovers.get(flightKey);
+    if (inflight) {
+      const first = await inflight;
+      return c.json(
+        first.ok ? { ...("plan" in first ? first.plan : first.result), idempotentReplay: true } : { ...first, idempotentReplay: true },
+        first.ok ? 200 : 409,
+      );
+    }
   }
-  // ponytail: check-then-handover — two concurrent requests with one key could both hand over;
-  // the one caller (Arete's recovery loop) is sequential per step.
-  const result = await service.handover({
+  const pending = service.handover({
     seatRef: decodeURIComponent(c.req.param("seatRef")!),
     reason: typeof body["reason"] === "string" ? (marker ? `${body["reason"]} ${marker}` : body["reason"]) : marker,
     source: typeof body["source"] === "string" ? body["source"] : null,
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
     dryRun: body["dryRun"] === true,
   });
+  if (flightKey) {
+    const key = flightKey;
+    inflightHandovers.set(key, pending);
+    void pending.finally(() => inflightHandovers.delete(key)).catch(() => {});
+  }
+  const result = await pending;
 
   if (result.ok) {
     return c.json("plan" in result ? result.plan : result.result);

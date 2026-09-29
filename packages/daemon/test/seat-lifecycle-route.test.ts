@@ -192,6 +192,30 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("3.3: two CONCURRENT keyed handovers of one seat by one caller run the handover once", async () => {
+    const { sessionName } = seedSeat();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const handover = vi.spyOn(SeatHandoverService.prototype, "handover").mockImplementation(async () => {
+      await gate; // hold the first handover open while the duplicate arrives
+      return { ok: true, result: { status: "completed" } } as never;
+    });
+    const keyed = () =>
+      setup.app.request(`/api/seat/handover/${encodeURIComponent(sessionName)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "arete@arete-rig" },
+        body: JSON.stringify({ reason: "context limit", source: "fresh", idempotencyKey: "arete-recovery-concurrent" }),
+      });
+    const first = keyed();
+    const second = keyed();
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(handover).toHaveBeenCalledTimes(1);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(await b.json()).toMatchObject({ idempotentReplay: true, status: "completed" });
+  });
+
   it("3.2: the launch route passes the TRANSPORT caller and the recovery evidence; a refusal is 403", async () => {
     const launchFresh = vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({
       ok: false, code: "recovery_restart_refused", message: "refused", reasons: ["failure evidence required"],
