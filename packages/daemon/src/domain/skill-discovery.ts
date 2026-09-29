@@ -81,7 +81,9 @@ const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
  *  delimited by `---` lines, with at minimum `name` + `description`
  *  fields, plus a non-empty body. */
 export function parseSkillFrontmatter(content: string): ParseResult {
-  const match = FRONTMATTER_RE.exec(content);
+  // A CRLF SKILL.md (Windows checkout) left a trailing \r on the last frontmatter line,
+  // which the YAML parser rejects ("Unexpected scalar at node end").
+  const match = FRONTMATTER_RE.exec(content.replace(/\r\n/g, "\n"));
   if (!match) {
     return { ok: false, reason: "no YAML frontmatter delimited by --- lines" };
   }

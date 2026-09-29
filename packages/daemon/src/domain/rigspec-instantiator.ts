@@ -374,7 +374,10 @@ interface PodInstantiatorDeps {
     cwd: string;
     apply: true;
     topologyOwner?: string;
+    targetRoot?: string;
   }) => ReconcileSkillLoadoutResult;
+  /** pi seats keep skills in their own agent dir: <agentDir>/skills for a session name. */
+  piSkillsRoot?: (sessionName: string) => string;
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
@@ -1901,14 +1904,17 @@ export class PodRigInstantiator {
     if (
       configResult.config.skillLoadout
       && this.deps.skillReconciler
-      && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
+      && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex"
+        || (configResult.config.runtime === "pi" && this.deps.piSkillsRoot))
     ) {
+      const runtime = configResult.config.runtime as SkillRuntime;
       const projection = this.deps.skillReconciler({
         loadout: configResult.config.skillLoadout,
-        runtime: configResult.config.runtime,
+        runtime,
         cwd: configResult.config.cwd,
         apply: true,
         topologyOwner: canonicalSessionName,
+        ...(runtime === "pi" ? { targetRoot: this.deps.piSkillsRoot!(canonicalSessionName) } : {}),
       });
       if (!projection.ok) {
         return {

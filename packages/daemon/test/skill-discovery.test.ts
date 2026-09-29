@@ -228,3 +228,12 @@ describe("discoverSkillsForRuntime — SkillResource shape", () => {
     expect(result.rejected).toEqual([]);
   });
 });
+
+describe("parseSkillFrontmatter — Windows line endings", () => {
+  it("accepts a CRLF SKILL.md whose last frontmatter line is a quoted scalar", () => {
+    const crlf = ["---", "name: banner-design", 'description: "Design banners."', "metadata:", '  version: "1.0.0"', "---", "", "# Body"].join("\r\n");
+    const result = parseSkillFrontmatter(crlf);
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) expect(result.frontmatter.name).toBe("banner-design");
+  });
+});

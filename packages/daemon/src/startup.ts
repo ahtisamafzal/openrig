@@ -136,6 +136,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
+import { piSeatPaths } from "./adapters/pi-runner-protocol.js";
 import { fileURLToPath } from "node:url";
 // Slice 11 (release-0.3.1 workflow-spec-folder-discovery) — adds
 // status + error_message columns to workflow_specs so the scanner
@@ -871,6 +872,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       });
     },
     skillReconciler: reconcileSkillLoadout,
+    // pi seats read skills from their own agent dir (PI_CODING_AGENT_DIR), the same path the runner uses
+    piSkillsRoot: (sessionName: string) => nodePath.join(piSeatPaths(piStateRoot, sessionName).agentDir, "skills"),
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();

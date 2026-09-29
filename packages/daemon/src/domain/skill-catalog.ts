@@ -23,7 +23,9 @@ const SAFE_TOPOLOGY_OWNER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 
 export type SkillSelectionSource = "system" | "topology" | "project";
-export type SkillRuntime = "claude-code" | "codex";
+/** Pi keeps skills in each seat's private agent dir (PI_CODING_AGENT_DIR/skills), not the
+ *  project, so a pi reconcile names its targetRoot explicitly and touches no Git ignore file. */
+export type SkillRuntime = "claude-code" | "codex" | "pi";
 
 export interface CatalogSkill {
   id: string;
@@ -360,8 +362,11 @@ function targetRootFor(runtime: SkillRuntime, cwd: string): string {
   return nodePath.join(cwd, runtime === "claude-code" ? ".claude" : ".agents", "skills");
 }
 
-function ownershipManifestPath(cwd: string, runtime: SkillRuntime): string {
-  return nodePath.join(cwd, ".openrig", "skill-loadouts", `${runtime}.json`);
+function ownershipManifestPath(cwd: string, runtime: SkillRuntime, targetRoot: string): string {
+  // pi: beside the seat's skills (its agent dir), not in the shared project
+  return runtime === "pi"
+    ? nodePath.join(nodePath.dirname(targetRoot), ".openrig", "skill-loadouts", "pi.json")
+    : nodePath.join(cwd, ".openrig", "skill-loadouts", `${runtime}.json`);
 }
 
 function readOwnershipManifest(path: string, runtime: SkillRuntime, targetRoot: string): OwnershipManifest {
@@ -664,10 +669,15 @@ export function reconcileSkillLoadout(input: {
    *  union instead of deleting one another. CLI-only reconciliation uses the
    *  workspace owner. */
   topologyOwner?: string;
+  /** Required for pi: the seat's skills dir (<agentDir>/skills). Ignored otherwise. */
+  targetRoot?: string;
 }): ReconcileSkillLoadoutResult {
   const cwd = nodePath.resolve(input.cwd);
-  const targetRoot = targetRootFor(input.runtime, cwd);
-  const manifestPath = ownershipManifestPath(cwd, input.runtime);
+  if (input.runtime === "pi" && !input.targetRoot) {
+    return { ok: false, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot: "", manifestPath: "", receipts: [], removed: [], errors: [{ code: "target_root_required", message: "pi skill reconcile needs the seat's skills dir (targetRoot)" }] };
+  }
+  const targetRoot = input.runtime === "pi" ? nodePath.resolve(input.targetRoot!) : targetRootFor(input.runtime, cwd);
+  const manifestPath = ownershipManifestPath(cwd, input.runtime, targetRoot);
   const receipts: SkillProjectionReceipt[] = [];
   const errors: SkillCatalogFailure[] = [];
   let manifest: OwnershipManifest;
@@ -846,7 +856,8 @@ export function reconcileSkillLoadout(input: {
     .sort((a, b) => compareBytes(a.id, b.id));
   let gitIgnorePlans: GitIgnorePlan[];
   try {
-    gitIgnorePlans = planGitIgnores({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
+    // pi's targets live in the seat's state dir, outside any project repo: nothing to ignore
+    gitIgnorePlans = input.runtime === "pi" ? [] : planGitIgnores({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
   } catch (err) {
     return {
       ok: false,

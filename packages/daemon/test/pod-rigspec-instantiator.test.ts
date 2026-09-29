@@ -306,6 +306,52 @@ profiles:
     }
   });
 
+  it("reconciles a pi seat's managed skills into that seat's own skills dir", async () => {
+    // Same shape as the configured-catalog test above: valid on POSIX; on Windows both hit this
+    // file's POSIX node:path mock (roadmap 1.10 backlog). The pi reconcile itself is covered with
+    // real Windows paths in skill-catalog-loadout.test.ts.
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-instantiator-pi-skills-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const catalog = nodePath.join(root, "managed-skills");
+      fs.mkdirSync(nodePath.join(catalog, "topology-skill"), { recursive: true });
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(nodePath.join(catalog, "topology-skill", "SKILL.md"), "---\nname: topology-skill\ndescription: Use when testing pi.\n---\n\n# t\n");
+      for (const args of [["init", "-q"], ["config", "user.email", "t@openrig.invalid"], ["config", "user.name", "T"], ["add", "."], ["commit", "-qm", "f"]]) {
+        execFileSync("git", ["-C", catalog, ...args]);
+      }
+      const skillReconciler = vi.fn((input: { runtime: string; targetRoot?: string }) => ({
+        ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime,
+        targetRoot: input.targetRoot ?? "", manifestPath: "", receipts: [], removed: [], errors: [],
+      }));
+      const files = {
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: "name: impl\nversion: \"1.0.0\"\nimports:\n  - ref: local:../shared\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: [topology-skill]",
+        [`${RIG_ROOT}/agents/shared/agent.yaml`]: "name: shared\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles: {}\n",
+      };
+      const piAdapter = { ...mockAdapter(), runtime: "pi" } as RuntimeAdapter;
+      const setupResult = setup(undefined, undefined, undefined, undefined, { pi: piAdapter }, {
+        fsOps: mockFs(files),
+        skillsRootResolver: () => catalog,
+        skillReconciler,
+        piSkillsRoot: (session: string) => `/state/pi/${session}/agent/skills`,
+      });
+      db = setupResult.db;
+      const rig = makeRigSpec({
+        pods: [{ id: "dev", label: "Dev", members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "pi", cwd: root }], edges: [] }],
+      });
+
+      const result = await setupResult.inst.instantiate(RigSpecCodec.serialize(rig), RIG_ROOT);
+
+      expect(skillReconciler, JSON.stringify(result)).toHaveBeenCalledOnce();
+      const call = skillReconciler.mock.calls[0]![0] as { runtime: string; targetRoot?: string; topologyOwner?: string };
+      expect(call.runtime).toBe("pi");
+      expect(call.targetRoot).toBe(`/state/pi/${call.topologyOwner}/agent/skills`);
+    } finally {
+      db?.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);

@@ -575,3 +575,53 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(readFileSync(join(external, "marker"), "utf8")).toBe("preserved\n");
   });
 });
+
+describe("pi: managed skills in the seat's own agent dir", () => {
+  it("needs the seat skills dir; installs there (path with a space), removes a deselected skill, never touches the project's Git ignore", () => {
+    const f = fixture();
+    writeSkill(f.catalog, "keep-me");
+    writeSkill(f.catalog, "drop-me");
+    commit(f.root);
+    const seatSkills = join(f.root, "pi state", "dev@arete", "agent", "skills");
+
+    const both = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: ["keep-me", "drop-me"] });
+    expect(both.ok).toBe(true);
+    if (!both.ok) return;
+    expect(reconcileSkillLoadout({ loadout: both.loadout, runtime: "pi", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: false, errors: [{ code: "target_root_required" }] });
+
+    const first = reconcileSkillLoadout({ loadout: both.loadout, runtime: "pi", cwd: f.project, apply: true, topologyOwner: "dev@arete", targetRoot: seatSkills });
+    expect(first).toMatchObject({ ok: true, applied: true, removed: [] });
+    expect(existsSync(join(seatSkills, "keep-me", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(seatSkills, "drop-me", "SKILL.md"))).toBe(true);
+    expect(existsSync(join(f.root, "pi state", "dev@arete", "agent", ".openrig", "skill-loadouts", "pi.json"))).toBe(true);
+    expect(existsSync(join(f.project, ".gitignore"))).toBe(false);
+    expect(existsSync(join(f.project, ".openrig"))).toBe(false);
+
+    const fewer = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: ["keep-me"] });
+    if (!fewer.ok) throw new Error("unreachable");
+    const second = reconcileSkillLoadout({ loadout: fewer.loadout, runtime: "pi", cwd: f.project, apply: true, topologyOwner: "dev@arete", targetRoot: seatSkills });
+    expect(second).toMatchObject({ ok: true, applied: true, removed: ["drop-me"] });
+    expect(existsSync(join(seatSkills, "drop-me"))).toBe(false);
+    expect(existsSync(join(seatSkills, "keep-me", "SKILL.md"))).toBe(true);
+
+    const again = reconcileSkillLoadout({ loadout: fewer.loadout, runtime: "pi", cwd: f.project, apply: true, topologyOwner: "dev@arete", targetRoot: seatSkills });
+    expect(again).toMatchObject({ ok: true, applied: false, removed: [] });
+  });
+
+  it("refuses to remove a deselected pi skill the operator edited", () => {
+    const f = fixture();
+    writeSkill(f.catalog, "edited");
+    commit(f.root);
+    const seatSkills = join(f.root, "pi state", "s@r", "agent", "skills");
+    const one = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: ["edited"] });
+    if (!one.ok) throw new Error("unreachable");
+    reconcileSkillLoadout({ loadout: one.loadout, runtime: "pi", cwd: f.project, apply: true, topologyOwner: "s@r", targetRoot: seatSkills });
+    writeFileSync(join(seatSkills, "edited", "SKILL.md"), "operator notes\n");
+    const none = resolveSkillLoadout({ catalogRoot: f.catalog, topologySkills: [] });
+    if (!none.ok) throw new Error("unreachable");
+    const refused = reconcileSkillLoadout({ loadout: none.loadout, runtime: "pi", cwd: f.project, apply: true, topologyOwner: "s@r", targetRoot: seatSkills });
+    expect(refused).toMatchObject({ ok: false, errors: [{ code: "stale_target_modified" }] });
+    expect(readFileSync(join(seatSkills, "edited", "SKILL.md"), "utf8")).toBe("operator notes\n");
+  });
+});
