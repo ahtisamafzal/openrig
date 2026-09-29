@@ -378,9 +378,10 @@ export class SeatLifecycleService {
 
   /** Deliberately replace exactly one managed seat with a blank native occupant. */
   /**
-   * Roadmap 3.2: run the restart safety rules for this seat. Null = go ahead (the operator, or an
-   * agent that passed every guard — recorded durably, so it counts toward the retry cap even if the
-   * launch then fails); otherwise the refusal with every failing reason.
+   * Roadmap 3.2: run the restart safety rules for this seat. Returns the refusal (every failing
+   * reason), or `commit` — call it right before the relaunch really changes anything: an allowed
+   * agent restart is then recorded durably (it counts toward the retry cap even if the launch then
+   * fails), while a request refused later as invalid or a no-op never counts. Idempotent.
    */
   authorizeRecovery(
     caller: string | null | undefined,
@@ -388,28 +389,34 @@ export class SeatLifecycleService {
     target: { nodeId: string; role: string | null; sessionName: string },
     rigId: string,
     logicalId: string,
-  ): SeatRefusal | null {
+  ): { refusal: SeatRefusal } | { commit: () => void } {
     const decision = checkRecoveryRestart(this.db, { caller, target, evidence }, this.recoveryGuard);
     if (!decision.allowed) {
       return {
-        ok: false,
-        code: "recovery_restart_refused",
-        message: `Recovery restart refused for '${decision.identity}': ${decision.reasons.join("; ")}`,
-        reasons: decision.reasons,
+        refusal: {
+          ok: false,
+          code: "recovery_restart_refused",
+          message: `Recovery restart refused for '${decision.identity}': ${decision.reasons.join("; ")}`,
+          reasons: decision.reasons,
+        },
       };
     }
-    if (decision.caller === "agent") {
-      this.eventBus.emit({
-        type: RECOVERY_EVENT,
-        rigId,
-        nodeId: target.nodeId,
-        logicalId,
-        caller: decision.identity,
-        failureEvidence: evidence?.failureEvidence?.trim() ?? "",
-        evidenceRef: evidence?.evidenceRef?.trim() ?? "",
-      });
-    }
-    return null;
+    let done = decision.caller !== "agent";
+    return {
+      commit: () => {
+        if (done || decision.caller !== "agent") return;
+        done = true;
+        this.eventBus.emit({
+          type: RECOVERY_EVENT,
+          rigId,
+          nodeId: target.nodeId,
+          logicalId,
+          caller: decision.identity,
+          failureEvidence: evidence?.failureEvidence?.trim() ?? "",
+          evidenceRef: evidence?.evidenceRef?.trim() ?? "",
+        });
+      },
+    };
   }
 
   async launchFresh(input: {
@@ -466,7 +473,7 @@ export class SeatLifecycleService {
       ?? deriveSessionName(seat.rigName, seat.logicalId);
     // Roadmap 3.2 — restart safety rules, before anything is changed (agents only).
     const recovery = this.authorizeRecovery(input.caller, input.recovery, { nodeId: node.id, role: node.role ?? null, sessionName: canonicalSessionName }, rig.rig.id, node.logicalId);
-    if (recovery) return recovery;
+    if ("refusal" in recovery) return recovery.refusal;
     const retiringRows = this.nonTerminalSessions(node.id);
     if (retiringRows.some((row) => row.origin === "claimed")) {
       return {
@@ -526,6 +533,7 @@ export class SeatLifecycleService {
           message: `Canonical tmux session "${canonicalSessionName}" is live, but its pane does not match this seat's current managed binding; refusing to stop it.`,
         };
       }
+      recovery.commit(); // 3.2: the relaunch really starts here (every refusal is behind us)
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
@@ -535,6 +543,7 @@ export class SeatLifecycleService {
       if (!stopped.ok) return stopped;
     }
 
+    recovery.commit(); // 3.2: no-op if already recorded on the live path
     // Reuse clean's exhaustive, positive-absence gate for stale/history rows.
     const remaining = this.nonTerminalSessions(node.id);
     const binding = this.sessionRegistry.getBindingForNode(node.id);

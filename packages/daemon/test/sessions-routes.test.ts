@@ -219,6 +219,66 @@ describe("Session routes", () => {
     expect(res.status).toBe(409);
   });
 
+  // Roadmap 3.2 — restart safety rules on the node launch + bulk restore routes
+  const AGENT = { "X-OpenRig-Session": "arete@arete-rig" };
+  it("3.2: an agent's FIRST launch of a seat is not a recovery restart (not gated)", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const rig = rigRepo.createRig("r01");
+    rigRepo.addNode(rig.id, "dev1-impl", { role: "worker" });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/launch`, { method: "POST", headers: AGENT });
+    expect(res.status).toBe(201);
+  });
+
+  it("3.2: an agent relaunching an existing seat that is NOT running is refused without evidence; nothing recorded", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl", { role: "worker" });
+    const old = sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateStatus(old.id, "exited");
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/launch`, { method: "POST", headers: AGENT });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "recovery_restart_refused" });
+    const n = (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'seat.recovery_restart_authorized'").get() as { n: number }).n;
+    expect(n).toBe(0);
+    // the operator relaunches the same seat without any evidence
+    const op = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/launch`, { method: "POST" });
+    expect(op.status).not.toBe(403);
+  });
+
+  it("3.2: a seat that is already running is a no-op, not a gated restart", async () => {
+    const { app, rigRepo, sessionRegistry } = createTestApp(db);
+    const rig = rigRepo.createRig("r01");
+    const node = rigRepo.addNode(rig.id, "dev1-impl", { role: "worker" });
+    const live = sessionRegistry.registerSession(node.id, "r01-dev1-impl");
+    sessionRegistry.updateStatus(live.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "r01-dev1-impl" });
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/dev1-impl/launch`, { method: "POST", headers: AGENT });
+    expect(res.status).toBe(409); // already_bound, as for anyone
+  });
+
+  it("3.2: agents are refused on bulk restores (subset launch); plans and the operator are not", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const rig = rigRepo.createRig("r01");
+    const bulk = (body: object, headers: Record<string, string> = AGENT) =>
+      app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+    const refused = await bulk({ seats: ["dev1-impl"] });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ code: "recovery_restart_refused" });
+    expect((await bulk({ seats: ["dev1-impl"], plan: true })).status).not.toBe(403);
+    expect((await bulk({ seats: ["dev1-impl"] }, {})).status).not.toBe(403);
+    expect((await bulk({ seats: ["dev1-impl"] }, { "X-OpenRig-Session": "human@host" })).status).not.toBe(403);
+  });
+
+  it("3.2: agents are refused on up, fleet restore and snapshot restore", async () => {
+    const { app } = createTestApp(db);
+    const post = (path: string, body: object) =>
+      app.request(path, { method: "POST", headers: { "Content-Type": "application/json", ...AGENT }, body: JSON.stringify(body) });
+    for (const [path, body] of [["/api/up", { sourceRef: "x" }], ["/api/crash-cart/restore-fleet", {}], ["/api/rigs/rig-1/restore/snap-1", {}]] as const) {
+      const res = await post(path, body);
+      expect(res.status, path).toBe(403);
+    }
+  });
+
   it("POST .../launch nonexistent node -> 404", async () => {
     const { app, rigRepo } = createTestApp(db);
     const rig = rigRepo.createRig("r01");

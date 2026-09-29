@@ -79,14 +79,36 @@ function orchestrates(db: Database.Database, ancestor: string, node: string): bo
   return false;
 }
 
+/** The requester's identity when it is an AGENT (a transport identity that is not a human seat); null = the operator. */
+export function agentIdentity(transportSession: string | null | undefined): string | null {
+  const id = transportSession?.trim();
+  return id && !isHumanSeatSessionRef(id) ? id : null;
+}
+
+/**
+ * Bulk/fleet restores (subset launch, `up`, crash-cart fleet restore, snapshot restore) relaunch
+ * many seats at once and cannot carry per-seat recovery evidence: agents are refused there and
+ * recover one seat at a time through the guarded single-seat routes; these stay the operator's.
+ */
+export function bulkRestoreRefusal(transportSession: string | null | undefined): { ok: false; code: "recovery_restart_refused"; message: string } | null {
+  const agent = agentIdentity(transportSession);
+  return agent
+    ? {
+        ok: false,
+        code: "recovery_restart_refused",
+        message: `Bulk restore refused for agent '${agent}': agents recover one seat at a time through the guarded seat launch (restart safety rules); bulk and fleet restores are the operator's.`,
+      }
+    : null;
+}
+
 export function checkRecoveryRestart(
   db: Database.Database,
   input: { caller: string | null | undefined; target: RecoveryTarget; evidence?: RecoveryEvidence | null },
   config: RecoveryGuardConfig = recoveryGuardConfig(),
   now: () => Date = () => new Date(),
 ): RecoveryDecision {
-  const identity = input.caller?.trim();
-  if (!identity || isHumanSeatSessionRef(identity)) return { allowed: true, caller: "operator" };
+  const identity = agentIdentity(input.caller);
+  if (!identity) return { allowed: true, caller: "operator" };
 
   const ev = input.evidence ?? {};
   const reasons: string[] = [];

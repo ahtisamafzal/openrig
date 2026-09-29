@@ -15,6 +15,7 @@ import type { RuntimeAdapter } from "../domain/runtime-adapter.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaimService } from "../domain/claim-service.js";
+import { bulkRestoreRefusal } from "../domain/recovery-restart-guard.js";
 import {
   RestoreConductor,
   createDefaultRestoreRig,
@@ -103,6 +104,9 @@ function recompute(attempt: FleetAttempt): void {
 
 // POST /api/crash-cart/restore-fleet — start the fleet restore, answer ON-COMMIT.
 crashCartRoutes.post("/restore-fleet", (c) => {
+  // Roadmap 3.2: bulk/fleet restores are the operator's; agents recover one seat at a time.
+  const bulkRefused = bulkRestoreRefusal(c.req.header("x-openrig-session"));
+  if (bulkRefused) return c.json(bulkRefused, 403);
   const deps = getDeps(c);
   const { rigRepo, snapshotRepo, restoreOrchestrator, runtimeAdapters } = deps;
   const fleetAttemptId = `fleet-${randomUUID()}`;

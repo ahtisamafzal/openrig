@@ -15,6 +15,7 @@ import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
 import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
 import { remoteUpLeaf } from "../domain/topology/remote-up-leaf.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
+import { bulkRestoreRefusal } from "../domain/recovery-restart-guard.js";
 import type { HttpHostEntry } from "../domain/hosts/hosts-registry-reader.js";
 
 export const upRoutes = new Hono();
@@ -201,6 +202,9 @@ upRoutes.post("/", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const sourceRef = typeof body["sourceRef"] === "string" ? body["sourceRef"] : "";
   const plan = body["plan"] === true;
+  // Roadmap 3.2: bulk/fleet restores are the operator's; agents recover one seat at a time.
+  const bulkRefused = bulkRestoreRefusal(c.req.header("x-openrig-session"));
+  if (bulkRefused && !plan) return c.json(bulkRefused, 403);
   const autoApprove = body["autoApprove"] === true;
   const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : undefined;

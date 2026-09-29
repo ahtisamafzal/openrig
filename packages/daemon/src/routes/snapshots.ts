@@ -6,6 +6,7 @@ import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { ResumeMetadataRefresher } from "../domain/resume-metadata-refresher.js";
 import type { RigRepository } from "../domain/rig-repository.js";
+import { bulkRestoreRefusal } from "../domain/recovery-restart-guard.js";
 import { deriveRestoreAttemptReceipt } from "../domain/restore-attempt-receipt.js";
 
 export const snapshotsRoutes = new Hono();
@@ -124,6 +125,9 @@ snapshotsRoutes.get("/:id", (c) => {
 // the original error payloads with appropriate HTTP status codes (404/409/500),
 // because in those cases no `restore.started` event was emitted.
 restoreRoutes.post("/:snapshotId", async (c) => {
+  // Roadmap 3.2: bulk/fleet restores are the operator's; agents recover one seat at a time.
+  const bulkRefused = bulkRestoreRefusal(c.req.header("x-openrig-session"));
+  if (bulkRefused) return c.json(bulkRefused, 403);
   const rigId = c.req.param("rigId")!;
   const snapshotId = c.req.param("snapshotId")!;
   const { snapshotRepo, restoreOrchestrator } = getDeps(c);
