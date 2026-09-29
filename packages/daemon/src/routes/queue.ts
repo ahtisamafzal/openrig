@@ -816,6 +816,7 @@ export function queueRoutes(): Hono {
     const destinationSession = c.req.query("destinationSession") || undefined;
     const sourceSession = c.req.query("sourceSession") || undefined;
     const handedOffFrom = c.req.query("handedOffFrom") || undefined;
+    const tag = c.req.query("tag") || undefined;
     const stateRaw = c.req.query("state") || undefined;
     const targetRepo = c.req.query("targetRepo") || undefined;
     const userLimit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
@@ -836,6 +837,7 @@ export function queueRoutes(): Hono {
         destinationSession,
         sourceSession,
         handedOffFrom,
+        tag,
         state,
         targetRepo,
         limit: userLimit,

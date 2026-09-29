@@ -764,6 +764,21 @@ describe("queue routes", () => {
     expect(data).toHaveLength(1);
   });
 
+  it("GET /list?tag= returns only items carrying that exact tag", async () => {
+    const create = (tags: string[]) => app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+      body: JSON.stringify({ destinationSession: "b@r", body: "x", tags }),
+    });
+    await create(["arete-step:k1", "fp:f1"]);
+    await create(["arete-step:k2"]);
+    await create(["arete-step:k1x"]); // prefix of nothing, not a match for k1
+    const res = await app.request("/api/queue/list?tag=arete-step:k1");
+    const data = (await res.json()) as Array<{ tags: string[] }>;
+    expect(data).toHaveLength(1);
+    expect(data[0]!.tags).toContain("fp:f1");
+  });
+
   // OPR.0.3.2.20 — `?attention=1` filter for the For You priority
   // windowing slice. Returns OPEN attention-class qitems (the durable
   // source of truth) so the UI Action-required + Approval lenses don't
