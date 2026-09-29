@@ -8,6 +8,20 @@ const tmp: string[] = [];
 afterEach(() => { for (const d of tmp.splice(0)) fs.rmSync(d, { recursive: true, force: true }); });
 const mkTmp = () => { const d = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-seat-home-")); tmp.push(d); return d; };
 
+// The auth link is a symlink; hosts that refuse symlinks SKIP these tests visibly (never a silent pass).
+const canSymlink = (() => {
+  const d = fs.mkdtempSync(nodePath.join(os.tmpdir(), "codex-seat-symlink-probe-"));
+  try {
+    fs.writeFileSync(nodePath.join(d, "t"), "");
+    fs.symlinkSync(nodePath.join(d, "t"), nodePath.join(d, "l"), "file");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+})();
+
 describe("per-seat Codex home (roadmap 1.12)", () => {
   it("is off unless OPENRIG_CODEX_SEAT_HOME=1 and OPENRIG_HOME are set", () => {
     expect(codexSeatRoot("dev-qa@r", {})).toBeNull();
@@ -22,16 +36,11 @@ describe("per-seat Codex home (roadmap 1.12)", () => {
     expect(codexSeatEnvPrefix("/h/s")).toBe(`CODEX_HOME='${nodePath.join("/h/s", ".codex")}' `);
   });
 
-  it("links the operator's auth (never a copy), idempotently; refuses when that would leave credentials seat-local", () => {
+  it.skipIf(!canSymlink)("links the operator's auth (never a copy), idempotently; refuses when that would leave credentials seat-local", () => {
     const global = mkTmp(), seat = nodePath.join(mkTmp(), ".codex");
     expect(() => linkCodexAuth(global, seat)).toThrow(/codex login/); // no global login yet
     fs.writeFileSync(nodePath.join(global, "auth.json"), "{}");
-    try {
-      linkCodexAuth(global, seat);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EPERM") return; // symlinks not permitted on this host
-      throw err;
-    }
+    linkCodexAuth(global, seat);
     const link = nodePath.join(seat, "auth.json");
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
     expect(fs.readlinkSync(link)).toBe(nodePath.join(global, "auth.json"));
@@ -107,7 +116,7 @@ describe("profile tables travel with a profile-bound seat", () => {
 });
 
 describe("isolated Codex launch: profile file lifecycle", () => {
-  it("a profile deleted globally is removed from the seat home before the preflight probes it", async () => {
+  it.skipIf(!canSymlink)("a profile deleted globally is removed from the seat home before the preflight probes it", async () => {
     const { vi } = await import("vitest");
     const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
     const { mockShellCommand } = await import("./helpers/shell-command-mock.js");
@@ -147,12 +156,7 @@ describe("isolated Codex launch: profile file lifecycle", () => {
         },
       });
       const binding = { id: "b", nodeId: "n", tmuxSession: "dev-qa@r", tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: mkTmp(), codexConfigProfile: "fleet" };
-      try {
-        await adapter.launchHarness(binding as never, { name: "dev-qa@r" });
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "EPERM") return; // symlinks not permitted on this host
-        throw err;
-      }
+      await adapter.launchHarness(binding as never, { name: "dev-qa@r" });
       expect(probed.home).toBe(seatHome);
       expect(probed.stalePresent).toBe(false);
     } finally {
