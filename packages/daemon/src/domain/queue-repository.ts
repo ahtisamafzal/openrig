@@ -364,6 +364,8 @@ export interface QueueListOptions {
   tag?: string;
   destinationSession?: string;
   sourceSession?: string;
+  /** The successor(s) of a handed-off item: exact lineage, independent of the result bound. */
+  handedOffFrom?: string;
   state?: QueueState | QueueState[];
   /** PL-007 — filter qitems by target_repo. Exact match. */
   targetRepo?: string;
@@ -2980,6 +2982,10 @@ export class QueueRepository {
     if (opts?.sourceSession) {
       conditions.push("source_session = ?");
       params.push(opts.sourceSession);
+    }
+    if (opts?.handedOffFrom) {
+      conditions.push("handed_off_from = ?");
+      params.push(opts.handedOffFrom);
     }
     if (opts?.state) {
       const states = Array.isArray(opts.state) ? opts.state : [opts.state];

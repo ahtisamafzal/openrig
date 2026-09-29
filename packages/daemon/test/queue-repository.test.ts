@@ -389,6 +389,15 @@ describe("QueueRepository", () => {
     expect(captured.filter((e) => e.type === "queue.created")).toHaveLength(2); // create + handoff-create
   });
 
+  it("list handedOffFrom returns the exact successor, beyond any result window", async () => {
+    const item = await repo.create({ sourceSession: "alice@rig", destinationSession: "bob@rig", body: "do it" });
+    const { created } = await repo.handoff({ qitemId: item.qitemId, fromSession: "bob@rig", toSession: "carol@rig" });
+    // 250 newer rows for the same seat pair push the successor out of a newest-first window
+    for (let i = 0; i < 250; i++) await repo.create({ sourceSession: "bob@rig", destinationSession: "carol@rig", body: `noise ${i}` });
+    expect(repo.list({ sourceSession: "bob@rig", destinationSession: "carol@rig", limit: 200 }).some((r) => r.qitemId === created.qitemId)).toBe(false);
+    expect(repo.list({ handedOffFrom: item.qitemId }).map((r) => r.qitemId)).toEqual([created.qitemId]);
+  });
+
   it("handoff refuses on already-terminal qitem", async () => {
     const item = await repo.create({
       sourceSession: "alice@rig",
