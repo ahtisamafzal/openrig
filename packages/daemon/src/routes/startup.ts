@@ -191,6 +191,20 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
       const ok = result.status === "launched" && after.state === "running";
       return c.json({ ...result, ok, observed: after, ...(!ok ? { message: after.detail, freshAllowed: false } : {}) }, ok ? 200 : 409);
     }
+    // Roadmap 3.2 — resuming an EXISTING stopped seat is a recovery relaunch: an agent (transport
+    // identity) passes the restart safety rules; the operator (the TUI) is not gated.
+    let reserve: () => object | null = () => null; // a refusal when the cap filled up meanwhile
+    if (history.length > 0) {
+      const auth = seatLifecycleService(c).authorizeRecovery(
+        c.req.header("x-openrig-session")?.trim() || null,
+        body.recovery && typeof body.recovery === "object" ? body.recovery : null,
+        { nodeId: node.id, role: node.role ?? null, sessionName: observed.sessionName },
+        rig.rig.id,
+        node.logicalId,
+      );
+      if ("refusal" in auth) return c.json(auth.refusal, 403);
+      reserve = auth.commit;
+    }
     const selectedRig = { ...rig, nodes: [node] };
     let snapshot = currentSnapshot(c, selectedRig);
     if (!snapshot) {
@@ -201,6 +215,8 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
     const forecast = buildRestorePlanPreview(selectedRig, snapshot, collectPreviewSessionRows(repo(c).db, selectedRig, snapshot)).nodes[0]!;
     if (history.length > 0 && forecast.intendedAction !== "resume-original") return c.json({ ok: false, code: "resume_unavailable", freshAllowed: forecast.freshRequired,
       message: forecast.reason ?? "The prior conversation cannot be resumed under this seat's configured policy. A fresh conversation needs a separate decision." }, 409);
+    const capped = reserve(); // recorded right before the restore mutation (cap re-checked atomically)
+    if (capped) return c.json(capped, 403);
     const result = await dep<RestoreOrchestrator>(c, "restoreOrchestrator").launchSingleNode(rig.rig.id, node.logicalId, {
       snapshotId: snapshot.id, adapters: dep<Record<string, RuntimeAdapter>>(c, "runtimeAdapters"), fsOps: { exists: existsSync },
     });

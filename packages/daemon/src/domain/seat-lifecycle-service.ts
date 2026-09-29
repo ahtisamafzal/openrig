@@ -17,7 +17,7 @@ import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
-import { checkRecoveryRestart, recoveryGuardConfig, RECOVERY_EVENT, type RecoveryEvidence, type RecoveryGuardConfig } from "./recovery-restart-guard.js";
+import { capRaceRefusal, checkRecoveryRestart, commitRecovery, recoveryGuardConfig, type RecoveryEvidence, type RecoveryGuardConfig } from "./recovery-restart-guard.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -389,7 +389,7 @@ export class SeatLifecycleService {
     target: { nodeId: string; role: string | null; sessionName: string },
     rigId: string,
     logicalId: string,
-  ): { refusal: SeatRefusal } | { commit: () => void } {
+  ): { refusal: SeatRefusal } | { commit: () => SeatRefusal | null } {
     const decision = checkRecoveryRestart(this.db, { caller, target, evidence }, this.recoveryGuard);
     if (!decision.allowed) {
       return {
@@ -401,20 +401,17 @@ export class SeatLifecycleService {
         },
       };
     }
-    let done = decision.caller !== "agent";
+    if (decision.caller !== "agent") return { commit: () => null };
+    let done = false;
     return {
+      // null = recorded (or already recorded); a refusal = the cap filled up concurrently
       commit: () => {
-        if (done || decision.caller !== "agent") return;
+        if (done) return null;
+        if (!commitRecovery(this.db, this.eventBus, this.recoveryGuard, { rigId, nodeId: target.nodeId, logicalId, caller: decision.identity, evidence })) {
+          return capRaceRefusal(decision.identity);
+        }
         done = true;
-        this.eventBus.emit({
-          type: RECOVERY_EVENT,
-          rigId,
-          nodeId: target.nodeId,
-          logicalId,
-          caller: decision.identity,
-          failureEvidence: evidence?.failureEvidence?.trim() ?? "",
-          evidenceRef: evidence?.evidenceRef?.trim() ?? "",
-        });
+        return null;
       },
     };
   }
@@ -533,7 +530,8 @@ export class SeatLifecycleService {
           message: `Canonical tmux session "${canonicalSessionName}" is live, but its pane does not match this seat's current managed binding; refusing to stop it.`,
         };
       }
-      recovery.commit(); // 3.2: the relaunch really starts here (every refusal is behind us)
+      const capped = recovery.commit(); // 3.2: the relaunch really starts here (every refusal is behind us)
+      if (capped) return capped;
       const stopped = await this.stopManagedTmuxSeat(
         resolved,
         currentSession,
@@ -543,7 +541,8 @@ export class SeatLifecycleService {
       if (!stopped.ok) return stopped;
     }
 
-    recovery.commit(); // 3.2: no-op if already recorded on the live path
+    const capped = recovery.commit(); // 3.2: no-op if already recorded on the live path
+    if (capped) return capped;
     // Reuse clean's exhaustive, positive-absence gate for stale/history rows.
     const remaining = this.nonTerminalSessions(node.id);
     const binding = this.sessionRegistry.getBindingForNode(node.id);

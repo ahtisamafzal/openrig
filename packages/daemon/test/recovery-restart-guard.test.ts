@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { checkRecoveryRestart, recoveryGuardConfig, RECOVERY_EVENT, type RecoveryGuardConfig } from "../src/domain/recovery-restart-guard.js";
+import { checkRecoveryRestart, commitRecovery, recoveryGuardConfig, RECOVERY_EVENT, type RecoveryGuardConfig } from "../src/domain/recovery-restart-guard.js";
 
 // Roadmap 3.2 — restart safety rules for agents' recovery restarts.
 
@@ -104,6 +104,18 @@ describe("recovery restart guard (roadmap 3.2)", () => {
     expect(!self.allowed && self.reasons.join()).toMatch(/may not recovery-restart itself/);
     const unknown = check("stranger@nowhere");
     expect(!unknown.allowed && unknown.reasons.join()).toMatch(/unknown caller 'stranger@nowhere'/);
+  });
+
+  it("concurrent restarts can never both pass the cap: the reservation re-checks atomically", () => {
+    const cap1 = { ...CFG, retryCap: 1 };
+    // two requests both pass the up-front check (nothing recorded yet)...
+    expect(check("arete@arete-rig", EVIDENCE, cap1).allowed).toBe(true);
+    expect(check("arete@arete-rig", EVIDENCE, cap1).allowed).toBe(true);
+    // ...but only the first reservation commits
+    const reserve = () => commitRecovery(db, eventBus, cap1, { rigId: ids.rig, nodeId: ids.dev, logicalId: "dev.impl", caller: "arete@arete-rig", evidence: EVIDENCE });
+    expect([reserve(), reserve()]).toEqual([true, false]);
+    const n = (db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = ?").get(RECOVERY_EVENT) as { n: number }).n;
+    expect(n).toBe(1);
   });
 
   it("configuration from the environment", () => {

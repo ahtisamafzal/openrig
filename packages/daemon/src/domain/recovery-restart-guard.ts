@@ -12,6 +12,7 @@
 // Every refusal is reported (not first-match), like the Arete original.
 
 import type Database from "better-sqlite3";
+import type { EventBus } from "./event-bus.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { resolveSessionNodeId } from "./queue-owner.js";
 
@@ -60,6 +61,45 @@ export function recoveryGuardConfig(env: NodeJS.ProcessEnv = process.env): Recov
     recoveryCallers: list(env.OPENRIG_RECOVERY_CALLERS),
   };
 }
+
+const windowStart = (config: RecoveryGuardConfig, now: () => Date) =>
+  new Date(now().getTime() - config.windowHours * 3600_000).toISOString().replace("T", " ").slice(0, 19);
+
+const restartsInWindow = (db: Database.Database, nodeId: string, since: string) =>
+  (db.prepare(`SELECT COUNT(*) AS n FROM events WHERE type = ? AND node_id = ? AND created_at >= ?`).get(RECOVERY_EVENT, nodeId, since) as { n: number }).n;
+
+/**
+ * Record an allowed agent recovery restart — re-checking the retry cap in the SAME synchronous
+ * step as the insert (better-sqlite3 is synchronous and the daemon single-threaded, so nothing can
+ * interleave): two concurrent requests that both passed the earlier check can never both commit
+ * past the cap. False = the cap filled up meanwhile; the caller must refuse.
+ */
+export function commitRecovery(
+  db: Database.Database,
+  eventBus: Pick<EventBus, "emit">,
+  config: RecoveryGuardConfig,
+  input: { rigId: string; nodeId: string; logicalId: string; caller: string; evidence?: RecoveryEvidence | null },
+  now: () => Date = () => new Date(),
+): boolean {
+  if (restartsInWindow(db, input.nodeId, windowStart(config, now)) >= config.retryCap) return false;
+  eventBus.emit({
+    type: RECOVERY_EVENT,
+    rigId: input.rigId,
+    nodeId: input.nodeId,
+    logicalId: input.logicalId,
+    caller: input.caller,
+    failureEvidence: input.evidence?.failureEvidence?.trim() ?? "",
+    evidenceRef: input.evidence?.evidenceRef?.trim() ?? "",
+  });
+  return true;
+}
+
+export const capRaceRefusal = (identity: string) => ({
+  ok: false as const,
+  code: "recovery_restart_refused" as const,
+  message: `Recovery restart refused for '${identity}': the retry cap was reached by a concurrent restart of this seat`,
+  reasons: ["hard retry cap reached (concurrent restart)"],
+});
 
 /** Is `ancestor` a delegates_to ancestor of `node` (the node orchestrates it, directly or not)? */
 function orchestrates(db: Database.Database, ancestor: string, node: string): boolean {
@@ -116,12 +156,7 @@ export function checkRecoveryRestart(
   if (!ev.failureEvidence?.trim()) reasons.push("failure evidence required: say what failed (evidence.failureEvidence)");
   if (!ev.evidenceRef?.trim()) reasons.push("evidence reference required: a queue item, watchdog history or log (evidence.evidenceRef)");
   // guard c: hard retry cap, counted from durable authorizations of this seat in the window
-  const since = new Date(now().getTime() - config.windowHours * 3600_000).toISOString().replace("T", " ").slice(0, 19);
-  const restarts = (
-    db
-      .prepare(`SELECT COUNT(*) AS n FROM events WHERE type = ? AND node_id = ? AND created_at >= ?`)
-      .get(RECOVERY_EVENT, input.target.nodeId, since) as { n: number }
-  ).n;
+  const restarts = restartsInWindow(db, input.target.nodeId, windowStart(config, now));
   if (restarts >= config.retryCap) {
     reasons.push(`hard retry cap reached: ${restarts} recovery restart(s) of this seat in ${config.windowHours}h >= ${config.retryCap}; a human decides now`);
   }

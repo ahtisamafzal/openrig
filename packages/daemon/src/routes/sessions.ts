@@ -35,7 +35,7 @@ import type { PermissionDriftReader } from "../domain/permission-drift-observer.
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
-import { agentIdentity, bulkRestoreRefusal, checkRecoveryRestart, RECOVERY_EVENT, type RecoveryEvidence } from "../domain/recovery-restart-guard.js";
+import { agentIdentity, bulkRestoreRefusal, capRaceRefusal, checkRecoveryRestart, commitRecovery, recoveryGuardConfig, type RecoveryEvidence } from "../domain/recovery-restart-guard.js";
 import { deriveSessionName } from "../domain/session-name.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 
@@ -273,7 +273,8 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
   // Roadmap 3.2 — an agent relaunching an EXISTING seat that is not running (a recovery restart)
   // passes the restart safety rules; first starts (no history, or retryStartupFrom above), a seat
   // already running (a no-op) and the operator are not gated. Recorded right before the launch.
-  let commitRecovery: () => void = () => {};
+  let reserveRecovery: () => boolean = () => true;
+  let refusedIdentity = "";
   {
     const caller = c.req.header("x-openrig-session")?.trim() || null;
     const history = getDeps(c).sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === node.id);
@@ -290,10 +291,10 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
         return c.json({ ok: false, code: "recovery_restart_refused", message: `Recovery restart refused for '${decision.identity}': ${decision.reasons.join("; ")}`, reasons: decision.reasons }, 403);
       }
       if (decision.caller === "agent") {
-        commitRecovery = () =>
-          (c.get("eventBus" as never) as EventBus).emit({
-            type: RECOVERY_EVENT, rigId, nodeId: node.id, logicalId: node.logicalId, caller: decision.identity,
-            failureEvidence: body.recovery?.failureEvidence?.trim() ?? "", evidenceRef: body.recovery?.evidenceRef?.trim() ?? "",
+        refusedIdentity = decision.identity;
+        reserveRecovery = () =>
+          commitRecovery(rigRepo.db, c.get("eventBus" as never) as EventBus, recoveryGuardConfig(), {
+            rigId, nodeId: node.id, logicalId: node.logicalId, caller: decision.identity, evidence: body.recovery ?? null,
           });
       }
     }
@@ -304,7 +305,7 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     if (!restoreOrchestrator) {
       return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
     }
-    commitRecovery();
+    if (!reserveRecovery()) return c.json(capRaceRefusal(refusedIdentity), 403);
     const result = await restoreOrchestrator.launchSingleNode(rigId, node.logicalId, { snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
     if (!result.ok) {
       return c.json(result, narrowLaunchErrorStatus(result.code));
@@ -335,9 +336,10 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json(result);
   }
 
+  // reserved before the launch (the cap check and the record are one atomic step); launchNode's own
+  // refusals (e.g. already_bound) are excluded above — only a not-running existing seat gets here
+  if (!reserveRecovery()) return c.json(capRaceRefusal(refusedIdentity), 403);
   const result = await nodeLauncher.launchNode(rigId, logicalId);
-  // launchNode refuses (e.g. already_bound) without changing anything: only a real launch counts
-  if (result.ok) commitRecovery();
 
   if (!result.ok) {
     const status = result.code === "node_not_found" ? 404

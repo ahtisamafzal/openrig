@@ -37,6 +37,20 @@ describe("startup consent and effect boundary", () => {
     const second = await request();
     expect(await second.json()).toMatchObject({ ok: true, rigId: body.rigId, reused: true });
   });
+  it("3.2: an AGENT resuming an existing stopped seat passes the restart safety rules; the TUI (operator) does not", async () => {
+    const { rig, node } = seat();
+    const restore = vi.spyOn(setup.restoreOrchestrator!, "launchSingleNode");
+    const agent = await setup.app.request(`/api/startup/${rig.id}/operator.agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "arete@arete-rig" },
+      body: JSON.stringify({ action: "resume", revision: startupRevision(db, node) }),
+    });
+    expect(agent.status).toBe(403);
+    expect(await agent.json()).toMatchObject({ code: "recovery_restart_refused" });
+    expect(restore).not.toHaveBeenCalled();
+    const operator = await post(rig.id, startupRevision(db, node), "resume");
+    expect(operator.status).not.toBe(403);
+  });
   it("rejects a changed occupant or model before invoking fresh launch", async () => {
     const { rig, node } = seat(); const revision = startupRevision(db, node);
     db.prepare("UPDATE nodes SET model = ? WHERE id = ?").run("changed-model", node.id);
