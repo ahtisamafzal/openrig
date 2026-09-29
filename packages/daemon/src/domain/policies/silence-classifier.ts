@@ -17,7 +17,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SeatActivityService } from "../seat-activity-service.js";
-import type { WatchdogHistoryLog } from "../watchdog-history-log.js";
 import { decideSilence, type SilenceHealth } from "../silence-classifier.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
@@ -34,7 +33,6 @@ export interface SilenceEscalation {
 export interface SilenceClassifierDeps {
   db: Database.Database;
   seatActivity: Pick<SeatActivityService, "getSeatStateBySession">;
-  history: Pick<WatchdogHistoryLog, "listForJob">;
   /** Provider evidence for the seat; absent or failing = healthy (never blocks the watchdog). */
   healthOf?: (seat: string) => Promise<SilenceHealth>;
   /** Create (or find) the escalation item; `destination` undefined = the operator's human seat. */
@@ -94,10 +92,17 @@ export function makeSilenceClassifierPolicy(deps: SilenceClassifierDeps): Policy
       // A seat waiting on a prompt, or whose only work is parked, is legitimately blocked.
       const blocked = activity.needsInput.count > 0 || open.every((r) => r.state === "blocked");
       const health = deps.healthOf ? await deps.healthOf(seat).catch(() => HEALTHY) : HEALTHY;
-      // This idle episode's nudges: successful sends by THIS job since the seat went idle.
-      const nudgeCount = deps.history
-        .listForJob(job.jobId, 50)
-        .filter((e) => e.outcome === "sent" && e.evaluatedAt >= idleSince).length;
+      // This idle episode's nudges: DELIVERED sends by THIS job since the seat went idle — a failed
+      // delivery is not a nudge the seat ignored, and the count is unbounded (no history window),
+      // so later skips can never push old nudges out and restart the ladder.
+      const nudgeCount = (
+        deps.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM watchdog_history
+               WHERE job_id = ? AND outcome = 'sent' AND delivery_status = 'ok' AND evaluated_at >= ?`,
+          )
+          .get(job.jobId, idleSince) as { n: number }
+      ).n;
 
       const decision = decideSilence(
         { status: blocked ? "blocked" : "idle" },

@@ -1884,7 +1884,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         makeSilenceClassifierPolicy({
           db,
           seatActivity: seatActivityService,
-          history: watchdogHistoryLogInstance,
           ...(deps.providerService ? { healthOf: providerHealthFrom(() => deps.providerService!.getReadModel()) } : {}),
           escalate: async (e) => {
             const item = await queueRepoInstance.create({

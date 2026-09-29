@@ -98,7 +98,6 @@ interval_seconds: 60
     makeSilenceClassifierPolicy({
       db,
       seatActivity,
-      history: new WatchdogHistoryLog(db),
       escalate: async (e) => {
         escalations.push(e);
         return { qitemId: e.qitemId };
@@ -171,8 +170,8 @@ interval_seconds: 60
     // sends from an EARLIER idle episode do not count
     const jobId = realJob();
     const history = new WatchdogHistoryLog(db);
-    history.record({ jobId, evaluatedAt: "2026-09-29T09:00:00.000Z", outcome: "sent" });
-    history.record({ jobId, evaluatedAt: "2026-09-29T10:05:00.000Z", outcome: "sent" });
+    history.record({ jobId, evaluatedAt: "2026-09-29T09:00:00.000Z", outcome: "sent", deliveryStatus: "ok" });
+    history.record({ jobId, evaluatedAt: "2026-09-29T10:05:00.000Z", outcome: "sent", deliveryStatus: "ok" });
     const next = await policy().evaluate(job({ jobId }));
     expect(next.action === "send" && next.message).toContain("nudge 2/3");
   });
@@ -182,7 +181,7 @@ interval_seconds: 60
     setOracle("idle-at-prompt");
     const jobId = realJob();
     const history = new WatchdogHistoryLog(db);
-    for (const m of [1, 2, 3]) history.record({ jobId, evaluatedAt: `2026-09-29T10:0${m}:00.000Z`, outcome: "sent" });
+    for (const m of [1, 2, 3]) history.record({ jobId, evaluatedAt: `2026-09-29T10:0${m}:00.000Z`, outcome: "sent", deliveryStatus: "ok" });
     const p = policy();
     const a = await p.evaluate(job({ jobId, context: { escalateTo: "human-ops@host" } }));
     const b = await p.evaluate(job({ jobId, context: { escalateTo: "human-ops@host" } }));
@@ -212,7 +211,7 @@ interval_seconds: 60
     };
     const engine = new WatchdogPolicyEngine({
       jobsRepo, historyLog, eventBus, deliver, now: () => clock,
-      additionalPolicies: [policy({ history: historyLog })],
+      additionalPolicies: [policy()],
     });
     const registered = jobsRepo.register({
       policy: "silence-classifier",
@@ -229,6 +228,71 @@ interval_seconds: 60
     expect(sends).toHaveLength(3);
     expect(sends.map((m) => /nudge (\d)\/3/.exec(m)?.[1])).toEqual(["1", "2", "3"]);
     expect(new Set(escalations.map((e) => e.qitemId)).size).toBe(1);
+  });
+});
+
+describe("silence-classifier nudge ledger (engine path)", () => {
+  let db: Database.Database;
+  let clock: Date;
+  let escalations: string[];
+  const seatActivity = {
+    getSeatStateBySession: (): ArbitratedSeatState => ({
+      seatNodeId: "n1", activity: "idle-at-prompt", needsInput: { count: 0, reason: null },
+      decidedBy: "lifecycle-hooks", seq: 1, changedAt: IDLE_SINCE, rungs: [], lastSwap: null,
+    }),
+  };
+  function run(deliveryStatus: "ok" | "failed", evaluations: number, stepMinutes: number) {
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const historyLog = new WatchdogHistoryLog(db);
+    const sends: string[] = [];
+    const deliver: DeliveryFn = async (req) => {
+      sends.push(req.message);
+      return { status: deliveryStatus };
+    };
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo, historyLog, eventBus: new EventBus(db), deliver, now: () => clock,
+      additionalPolicies: [makeSilenceClassifierPolicy({
+        db, seatActivity, now: () => clock,
+        escalate: async (e) => { escalations.push(e.qitemId); return { qitemId: e.qitemId }; },
+      })],
+    });
+    const { jobId } = jobsRepo.register({
+      policy: "silence-classifier",
+      specYaml: `policy: silence-classifier\ntarget:\n  session: ${SEAT}\ninterval_seconds: 60\n`,
+      targetSession: SEAT, intervalSeconds: 60, activeWakeIntervalSeconds: 600, registeredBySession: "arete@arete-rig",
+    });
+    return (async () => {
+      for (let i = 0; i < evaluations; i++) {
+        await engine.evaluate(jobsRepo.getByIdOrThrow(jobId));
+        clock = new Date(clock.getTime() + stepMinutes * 60_000);
+      }
+      return sends;
+    })();
+  }
+  beforeEach(() => {
+    db = createFullTestDb();
+    migrate(db, [watchdogJobsSchema, watchdogHistorySchema, idleGateFiredConditionSchema]);
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+       VALUES ('q1', '2026-09-29T09:00:00Z', '2026-09-29T09:00:00Z', 'arete@arete', ?, 'in-progress', 'routine', NULL, '["arete-step:k"]', 'x')`,
+    ).run(SEAT);
+    clock = T0;
+    escalations = [];
+  });
+  afterEach(() => db.close());
+
+  it("a FAILED delivery is not a nudge the seat ignored: the ladder does not advance and nothing escalates", async () => {
+    const sends = await run("failed", 12, 11); // past the 10-min throttle every time
+    expect(sends.length).toBeGreaterThan(3);
+    expect(sends.every((m) => m.includes("nudge 1/3"))).toBe(true);
+    expect(escalations).toHaveLength(0);
+  });
+
+  it("more than 50 evaluations after escalation never restart the nudge ladder", async () => {
+    const sends = await run("ok", 80, 11);
+    expect(sends).toHaveLength(3);
+    expect(escalations.length).toBeGreaterThan(50);
+    expect(new Set(escalations).size).toBe(1); // one item for the episode
   });
 });
 
