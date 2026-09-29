@@ -128,3 +128,19 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
     expect(result.error).toContain("502");
   });
 });
+
+describe("5.3 notification target validation", () => {
+  it("accepts https and loopback http; refuses other schemes and embedded credentials without echoing the target", async () => {
+    const { notificationTargetProblem } = await import("../src/domain/mission-control/notification-adapter-types.js");
+    expect(notificationTargetProblem("https://ntfy.sh/private-topic")).toBeNull();
+    expect(notificationTargetProblem("http://localhost:8080/topic")).toBeNull();
+    expect(notificationTargetProblem("http://127.0.0.1/topic")).toBeNull();
+    expect(notificationTargetProblem("http://hooks.example.com/SECRET-PATH")).toMatch(/must use https/);
+    expect(notificationTargetProblem("file:///C:/x")).toMatch(/must use https/);
+    expect(notificationTargetProblem("https://u:SECRETPW@hooks.example.com/x")).toMatch(/credentials/);
+    expect(notificationTargetProblem("not a url")).toMatch(/not a valid URL/);
+    for (const t of ["http://hooks.example.com/SECRET-PATH", "https://u:SECRETPW@hooks.example.com/x"]) {
+      expect(notificationTargetProblem(t)).not.toMatch(/SECRET/);
+    }
+  });
+});

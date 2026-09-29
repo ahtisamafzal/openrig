@@ -30,3 +30,21 @@ export interface NotificationAdapter {
   readonly target: string;
   send(payload: NotificationPayload): Promise<NotificationDeliveryResult>;
 }
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** Roadmap 5.3: the notification target must be an https URL (plain http only to a loopback host,
+ *  e.g. a local ntfy) with no embedded credentials. Returns the problem, or null when valid. The
+ *  message never echoes the target: webhook URLs routinely carry a secret in their path. */
+export function notificationTargetProblem(target: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(target);
+  } catch {
+    return "OPENRIG_NOTIFICATIONS_TARGET is not a valid URL";
+  }
+  if (u.username || u.password) return "OPENRIG_NOTIFICATIONS_TARGET must not embed credentials (user:password@)";
+  if (u.protocol === "https:") return null;
+  if (u.protocol === "http:" && LOOPBACK.has(u.hostname)) return null;
+  return `OPENRIG_NOTIFICATIONS_TARGET must use https (plain http only to localhost); got ${u.protocol}`;
+}

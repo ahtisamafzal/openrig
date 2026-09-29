@@ -155,7 +155,7 @@ import { MissionControlAuditBrowse } from "./domain/mission-control/audit-browse
 import { MissionControlNotificationDispatcher } from "./domain/mission-control/notification-dispatcher.js";
 import { NtfyNotificationAdapter } from "./domain/mission-control/notification-adapter-ntfy.js";
 import { WebhookNotificationAdapter } from "./domain/mission-control/notification-adapter-webhook.js";
-import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
+import { notificationTargetProblem, type NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
 import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
@@ -1502,6 +1502,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const includeVerbCompletion =
       process.env.OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION === "1";
     if (mechanism !== "none" && target.length > 0) {
+      const problem = notificationTargetProblem(target);
+      if (problem) throw new Error(problem);
       let adapter: NotificationAdapter;
       if (mechanism === "ntfy") {
         adapter = new NtfyNotificationAdapter({ topicUrl: target });
