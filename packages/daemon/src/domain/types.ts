@@ -135,6 +135,8 @@ export type RigEvent =
   | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
   | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
+  // Roadmap 3.2 — an agent's recovery restart passed the restart safety guards (counts toward the cap).
+  | { type: "seat.recovery_restart_authorized"; rigId: string; nodeId: string; logicalId: string; caller: string; failureEvidence: string; evidenceRef: string }
   | { type: "restore.started"; rigId: string; snapshotId: string; snapshotSelection?: RestoreSnapshotSelection; intendedRoster?: Array<{ nodeId: string; logicalId: string }>; excludedNodes?: RestoreExcludedNode[] }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
   | { type: "restore.subset_completed"; rigId: string; snapshotId: string; result: RestoreResult }

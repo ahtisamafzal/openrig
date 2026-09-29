@@ -152,6 +152,46 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(delivery).not.toHaveBeenCalled();
   });
 
+  // Roadmap 3.2 — restart safety rules on the real launchFresh path.
+  it("3.2: an AGENT's recovery restart without evidence is refused before anything changes", async () => {
+    const seat = seedSeat();
+    const before = sessionRegistry.getSessionsForRig(seat.rig.id).length;
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "agent recovery", caller: "arete@arete-rig" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("recovery_restart_refused");
+    expect(result.reasons?.join("\n")).toMatch(/failure evidence required/);
+    expect(killed).toEqual([]); // the live seat was not touched
+    expect(launchBinding).toBeNull();
+    expect(sessionRegistry.getSessionsForRig(seat.rig.id)).toHaveLength(before);
+  });
+
+  it("3.2: an authorized agent recovery restart launches and is recorded toward the cap; the operator is not gated", async () => {
+    const guarded = new SeatLifecycleService({
+      db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux,
+      listProcesses: async () => [],
+      nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+      startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux, sleep: async () => undefined }),
+      runtimeAdapters: { "claude-code": adapter },
+      recoveryGuard: { retryCap: 2, windowHours: 24, protectedRoles: [], recoveryCallers: ["arete@arete-rig"] },
+    });
+    const seat = seedSeat();
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, tags, body)
+       VALUES ('q-work', '2026-09-29T09:00:00Z', '2026-09-29T09:00:00Z', 'arete@arete-rig', ?, 'in-progress', 'routine', NULL, NULL, 'b')`,
+    ).run(seat.sessionName);
+    const ok = await guarded.launchFresh({
+      seatRef: seat.sessionName, fresh: true, stop: true, reason: "agent recovery", caller: "arete@arete-rig",
+      recovery: { failureEvidence: "seat wedged, 3 nudges ignored", evidenceRef: "watchdog job w1", healthConsulted: true },
+    });
+    expect(ok.ok).toBe(true);
+    const recorded = db.prepare("SELECT COUNT(*) AS n FROM events WHERE type = 'seat.recovery_restart_authorized' AND node_id = ?").get(seat.node.id) as { n: number };
+    expect(recorded.n).toBe(1);
+    // the operator (no transport identity) relaunches with no evidence at all
+    const operator = await guarded.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "operator relaunch" });
+    expect(!operator.ok && operator.code === "recovery_restart_refused").toBe(false);
+  });
+
   it("supersedes detached history so a later reboot identifies the deliberate successor", async () => {
     const seat = seedSeat();
     alive.delete(seat.sessionName);

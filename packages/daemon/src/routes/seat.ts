@@ -179,7 +179,22 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
   });
 }
 
-function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 500 | 502 {
+/** Roadmap 3.2: the recovery evidence an agent attaches to a restart request. */
+function recoveryEvidence(body: Record<string, unknown>) {
+  const r = body["recovery"];
+  if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+  const o = r as Record<string, unknown>;
+  return {
+    ...(typeof o["failureEvidence"] === "string" ? { failureEvidence: o["failureEvidence"] } : {}),
+    ...(typeof o["evidenceRef"] === "string" ? { evidenceRef: o["evidenceRef"] } : {}),
+    ...(o["healthConsulted"] === true ? { healthConsulted: true } : {}),
+  };
+}
+/** The requester's TRANSPORT identity (never a body claim); absent = the operator. */
+const transportCaller = (c: { req: { header(name: string): string | undefined } }) => c.req.header("x-openrig-session")?.trim() || null;
+
+function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 403 | 404 | 409 | 500 | 502 {
+  if (code === "recovery_restart_refused") return 403;
   if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
@@ -209,6 +224,8 @@ seatRoutes.post("/launch/:seatRef", async (c) => {
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
     stop: body["stop"] === true,
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
+    caller: transportCaller(c),
+    recovery: recoveryEvidence(body),
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));

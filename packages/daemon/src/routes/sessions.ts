@@ -35,6 +35,8 @@ import type { PermissionDriftReader } from "../domain/permission-drift-observer.
 import { ProcessCensus } from "../domain/process-census.js";
 import { CodexThreadIdResolver } from "../domain/codex-thread-id.js";
 import { resolveLiveCodexThreadId } from "../domain/model-divergence/current-generation-record.js";
+import { checkRecoveryRestart, RECOVERY_EVENT, type RecoveryEvidence } from "../domain/recovery-restart-guard.js";
+import { deriveSessionName } from "../domain/session-name.js";
 import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
@@ -255,7 +257,29 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
+  const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string }; recovery?: RecoveryEvidence };
+
+  // Roadmap 3.2 — an agent (transport identity) relaunching a seat passes the restart safety rules;
+  // the operator (no identity / a human seat) is never gated. Recorded when allowed (counts toward the cap).
+  {
+    const caller = c.req.header("x-openrig-session")?.trim() || null;
+    const current = getDeps(c).sessionRegistry.getSessionsForRig(rigId).filter((s) => s.nodeId === node.id).at(-1);
+    const sessionName = current?.sessionName ?? deriveSessionName(rig.rig.name, node.logicalId);
+    const decision = checkRecoveryRestart(rigRepo.db, {
+      caller,
+      target: { nodeId: node.id, role: node.role ?? null, sessionName },
+      evidence: body.recovery && typeof body.recovery === "object" ? body.recovery : null,
+    });
+    if (!decision.allowed) {
+      return c.json({ ok: false, code: "recovery_restart_refused", message: `Recovery restart refused for '${decision.identity}': ${decision.reasons.join("; ")}`, reasons: decision.reasons }, 403);
+    }
+    if (decision.caller === "agent") {
+      (c.get("eventBus" as never) as EventBus).emit({
+        type: RECOVERY_EVENT, rigId, nodeId: node.id, logicalId: node.logicalId, caller: decision.identity,
+        failureEvidence: body.recovery?.failureEvidence?.trim() ?? "", evidenceRef: body.recovery?.evidenceRef?.trim() ?? "",
+      });
+    }
+  }
   if (body.retryStartupFrom !== undefined) {
     const retry = body.retryStartupFrom;
     if (body.snapshotId || !retry || !retry.member || typeof retry.member !== "object" || Array.isArray(retry.member) || typeof retry.rigRoot !== "string") {

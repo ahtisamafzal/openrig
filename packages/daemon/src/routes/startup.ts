@@ -167,10 +167,13 @@ startupRoutes.post("/:rigId/:logicalId", async (c) => {
     if (body.action === "start" && history.length > 0) return c.json({ ok: false, code: "history_present", message: "This seat has prior history. Choose resume, or explicitly confirm a fresh conversation." }, 409);
     if (body.action === "fresh") {
       const result = await seatLifecycleService(c).launchFresh({ seatRef: observed.sessionName, fresh: true,
-        reason: `TUI explicit fresh consent for ${node.logicalId}, observed revision ${body.revision}`, stop: false });
+        reason: `TUI explicit fresh consent for ${node.logicalId}, observed revision ${body.revision}`, stop: false,
+        // 3.2: an agent (transport identity) using this route passes the restart safety rules too
+        caller: c.req.header("x-openrig-session")?.trim() || null,
+        recovery: body.recovery && typeof body.recovery === "object" ? body.recovery : null });
       await refreshNativeMetadata(c, rig.rig.id);
       if (result.ok) dep<SnapshotCapture>(c, "snapshotCapture").captureSnapshot(rig.rig.id, "auto-rehydrate");
-      return c.json(result, result.ok ? 200 : 409);
+      return c.json(result, result.ok ? 200 : !result.ok && result.code === "recovery_restart_refused" ? 403 : 409);
     }
     // Never-occupied builtin seats reuse materialization's existing launch effect.
     if (history.length === 0 && rig.rig.name === "kernel") {

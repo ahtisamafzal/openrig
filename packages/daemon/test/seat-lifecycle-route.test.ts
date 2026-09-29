@@ -154,7 +154,26 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       stop: true,
       reason: "deliberate blank restart",
       operator: "orch-lead@seat-rig",
+      caller: null, // no transport identity: the operator (a body `operator` claim never counts)
+      recovery: null,
     });
     expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh" });
+  });
+
+  it("3.2: the launch route passes the TRANSPORT caller and the recovery evidence; a refusal is 403", async () => {
+    const launchFresh = vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({
+      ok: false, code: "recovery_restart_refused", message: "refused", reasons: ["failure evidence required"],
+    });
+    const res = await setup.app.request(`/api/seat/launch/${encodeURIComponent("dev-impl@seat-rig")}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "orch-lead@seat-rig" },
+      body: JSON.stringify({ fresh: true, stop: true, reason: "agent recovery", recovery: { evidenceRef: "q1", healthConsulted: true, extra: "ignored" } }),
+    });
+    expect(res.status).toBe(403);
+    expect(launchFresh).toHaveBeenCalledWith(expect.objectContaining({
+      caller: "orch-lead@seat-rig",
+      recovery: { evidenceRef: "q1", healthConsulted: true },
+    }));
+    expect(await res.json()).toMatchObject({ code: "recovery_restart_refused", reasons: ["failure evidence required"] });
   });
 });

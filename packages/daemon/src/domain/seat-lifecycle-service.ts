@@ -17,6 +17,7 @@ import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
+import { checkRecoveryRestart, recoveryGuardConfig, RECOVERY_EVENT, type RecoveryEvidence, type RecoveryGuardConfig } from "./recovery-restart-guard.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -50,6 +51,8 @@ export interface SeatLifecycleDeps {
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   occupantInvalidator?: OccupantInvalidator;
   activityOracle?: { declareOccupantSwap(nodeId: string, generation: string): void };
+  /** Roadmap 3.2 restart safety rules (default: from the environment). */
+  recoveryGuard?: RecoveryGuardConfig;
 }
 
 interface ResolvedSeat {
@@ -81,8 +84,11 @@ export interface SeatRefusal {
     | "launch_failed"
     | "startup_failed"
     | "attention_required"
-    | "runtime_identity_unverified";
+    | "runtime_identity_unverified"
+    | "recovery_restart_refused";
   message: string;
+  /** recovery_restart_refused: every guard that failed. */
+  reasons?: string[];
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
 }
@@ -159,6 +165,7 @@ export class SeatLifecycleService {
   private readonly runtimeAdapters: Record<string, RuntimeAdapter>;
   private readonly occupantInvalidator: OccupantInvalidator | null;
   private readonly activityOracle: SeatLifecycleDeps["activityOracle"] | null;
+  private readonly recoveryGuard: RecoveryGuardConfig;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -175,6 +182,7 @@ export class SeatLifecycleService {
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.occupantInvalidator = deps.occupantInvalidator ?? null;
     this.activityOracle = deps.activityOracle ?? null;
+    this.recoveryGuard = deps.recoveryGuard ?? recoveryGuardConfig();
   }
 
   async setModel(input: { seatRef: string; model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
@@ -369,12 +377,51 @@ export class SeatLifecycleService {
   }
 
   /** Deliberately replace exactly one managed seat with a blank native occupant. */
+  /**
+   * Roadmap 3.2: run the restart safety rules for this seat. Null = go ahead (the operator, or an
+   * agent that passed every guard — recorded durably, so it counts toward the retry cap even if the
+   * launch then fails); otherwise the refusal with every failing reason.
+   */
+  authorizeRecovery(
+    caller: string | null | undefined,
+    evidence: RecoveryEvidence | null | undefined,
+    target: { nodeId: string; role: string | null; sessionName: string },
+    rigId: string,
+    logicalId: string,
+  ): SeatRefusal | null {
+    const decision = checkRecoveryRestart(this.db, { caller, target, evidence }, this.recoveryGuard);
+    if (!decision.allowed) {
+      return {
+        ok: false,
+        code: "recovery_restart_refused",
+        message: `Recovery restart refused for '${decision.identity}': ${decision.reasons.join("; ")}`,
+        reasons: decision.reasons,
+      };
+    }
+    if (decision.caller === "agent") {
+      this.eventBus.emit({
+        type: RECOVERY_EVENT,
+        rigId,
+        nodeId: target.nodeId,
+        logicalId,
+        caller: decision.identity,
+        failureEvidence: evidence?.failureEvidence?.trim() ?? "",
+        evidenceRef: evidence?.evidenceRef?.trim() ?? "",
+      });
+    }
+    return null;
+  }
+
   async launchFresh(input: {
     seatRef: string;
     fresh: boolean;
     reason: string;
     stop?: boolean;
     operator?: string | null;
+    /** Transport identity of the requester (X-OpenRig-Session); absent = the operator. */
+    caller?: string | null;
+    /** Roadmap 3.2: an agent's recovery restart must carry its evidence. */
+    recovery?: RecoveryEvidence | null;
   }): Promise<LaunchFreshResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
@@ -417,6 +464,9 @@ export class SeatLifecycleService {
 
     const canonicalSessionName = deriveCanonicalFromEntry(resolved.entry)
       ?? deriveSessionName(seat.rigName, seat.logicalId);
+    // Roadmap 3.2 — restart safety rules, before anything is changed (agents only).
+    const recovery = this.authorizeRecovery(input.caller, input.recovery, { nodeId: node.id, role: node.role ?? null, sessionName: canonicalSessionName }, rig.rig.id, node.logicalId);
+    if (recovery) return recovery;
     const retiringRows = this.nonTerminalSessions(node.id);
     if (retiringRows.some((row) => row.origin === "claimed")) {
       return {
