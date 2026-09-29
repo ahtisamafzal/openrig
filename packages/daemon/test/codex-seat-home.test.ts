@@ -105,3 +105,58 @@ describe("profile tables travel with a profile-bound seat", () => {
     expect(extractTomlTable(global, "profiles.missing")).toBeNull();
   });
 });
+
+describe("isolated Codex launch: profile file lifecycle", () => {
+  it("a profile deleted globally is removed from the seat home before the preflight probes it", async () => {
+    const { vi } = await import("vitest");
+    const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+    const { mockShellCommand } = await import("./helpers/shell-command-mock.js");
+    const openrigHome = mkTmp();
+    const globalHome = mkTmp();
+    fs.writeFileSync(nodePath.join(globalHome, "auth.json"), "{}");
+    const seatHome = codexHomeOf(nodePath.join(openrigHome, "state", "codex-seat", "dev-qa@r"));
+    fs.mkdirSync(seatHome, { recursive: true });
+    fs.writeFileSync(nodePath.join(seatHome, "fleet.config.toml"), "[mcp_servers.old]\ncommand = 'x'\n"); // stale copy
+    const prev = { ...process.env };
+    process.env.OPENRIG_CODEX_SEAT_HOME = "1";
+    process.env.OPENRIG_HOME = openrigHome;
+    try {
+      let probed: { home?: string; stalePresent?: boolean } = {};
+      const tmux = mockShellCommand({
+        sendText: vi.fn(async () => ({ ok: true as const })),
+        sendKeys: vi.fn(async () => ({ ok: true as const })),
+        hasSession: vi.fn(async () => true),
+        getPaneCommand: vi.fn(async () => "codex"),
+        capturePaneContent: vi.fn(async () => ""),
+        getPanePid: vi.fn(async () => null),
+        listPanes: vi.fn(async () => []),
+      } as never);
+      const adapter = new CodexRuntimeAdapter({
+        tmux,
+        codexHome: globalHome,
+        fsOps: {
+          readFile: (p: string) => fs.readFileSync(p, "utf8"),
+          writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
+          exists: (p: string) => fs.existsSync(p),
+          mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        },
+        sleep: async () => {},
+        verifyProfilePreflight: async (_profile: string, codexHome?: string) => {
+          probed = { home: codexHome, stalePresent: fs.existsSync(nodePath.join(seatHome, "fleet.config.toml")) };
+          return { ok: false, error: "stop here" } as never;
+        },
+      });
+      const binding = { id: "b", nodeId: "n", tmuxSession: "dev-qa@r", tmuxWindow: null, tmuxPane: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: mkTmp(), codexConfigProfile: "fleet" };
+      try {
+        await adapter.launchHarness(binding as never, { name: "dev-qa@r" });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EPERM") return; // symlinks not permitted on this host
+        throw err;
+      }
+      expect(probed.home).toBe(seatHome);
+      expect(probed.stalePresent).toBe(false);
+    } finally {
+      process.env = prev;
+    }
+  });
+});

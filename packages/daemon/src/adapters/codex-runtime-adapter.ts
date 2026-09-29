@@ -761,6 +761,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const source = nodePath.join(globalHome, profileFile);
         const target = nodePath.join(seatHome, profileFile);
         if (this.fs.exists(source)) this.fs.writeFile(target, this.fs.readFile(source));
+        else fs.rmSync(target, { force: true }); // deleted globally = gone here too (no stale MCP/settings)
       }
       this.fs.mkdirp(nodePath.dirname(seatConfig));
       this.fs.writeFile(seatConfig, content);
