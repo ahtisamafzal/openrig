@@ -57,13 +57,20 @@ describe("per-seat Codex home (roadmap 1.12)", () => {
 });
 
 describe("fsSafeName (projection ids as directory names)", () => {
-  it("percent-encodes Windows-forbidden characters on win32 only (injective)", async () => {
+  it("is injective on Windows even under case-insensitivity, trailing dots and device names", async () => {
     const { fsSafeName } = await import("../src/adapters/fs-safe-name.js");
-    expect(fsSafeName("shared:openrig-core", "win32")).toBe("shared%3Aopenrig-core");
-    expect(fsSafeName("a:b", "win32")).not.toBe(fsSafeName("a_b", "win32")); // injective
-    expect(fsSafeName("a%3Ab", "win32")).not.toBe(fsSafeName("a:b", "win32"));
-    expect(fsSafeName('<>"|?*', "win32")).toBe("%3C%3E%22%7C%3F%2A");
-    expect(fsSafeName("shared:openrig-core", "linux")).toBe("shared:openrig-core");
+    const w = (id: string) => fsSafeName(id, "win32");
+    expect(w("openrig-skills")).toBe("openrig-skills"); // plain lowercase ids unchanged
+    expect(w("shared:openrig-core")).toBe("shared%3Aopenrig-core");
+    const ids = ["a:b", "a_b", "a%3Ab", "Foo", "foo", "FOO", "name", "name.", "con", "CON", "con.txt", "nul", "x y", "é"];
+    const folded = ids.map((id) => w(id).toLowerCase());
+    expect(new Set(folded).size).toBe(ids.length); // no two ids share a directory, case-folded
+    for (const name of ids.map(w)) {
+      expect(name).not.toMatch(/[<>:"|?*\\/ ]/);
+      expect(name.endsWith(".")).toBe(false);
+      expect(/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(name)).toBe(false);
+    }
+    expect(fsSafeName("shared:openrig-core", "linux")).toBe("shared:openrig-core"); // POSIX unchanged
   });
 });
 

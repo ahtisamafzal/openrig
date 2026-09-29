@@ -77,7 +77,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // (defaultProfilePreflight, module-private); tests inject a controlled probe
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
-  private verifyProfilePreflight: (profile: string) => Promise<CodexProfileProbeResult>;
+  private verifyProfilePreflight: (profile: string, codexHome?: string) => Promise<CodexProfileProbeResult>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
@@ -98,7 +98,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     codexHome?: string;
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
-    verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
+    verifyProfilePreflight?: (profile: string, codexHome?: string) => Promise<CodexProfileProbeResult>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
   }) {
     this.tmux = deps.tmux;
@@ -361,7 +361,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
     if (profile) {
-      const probeResult = await this.verifyProfilePreflight(profile);
+      // Probe the configuration the seat will actually run with.
+      const probeResult = await this.verifyProfilePreflight(profile, seatRoot ? codexHomeOf(seatRoot) : undefined);
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -751,11 +752,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         const table = extractTomlTable(globalContent, name);
         if (table) content = upsertTomlTable(content, name, table);
       }
-      // A profile-bound seat launches with -p <profile>: the seat home must carry it.
+      // A profile-bound seat launches with -p <profile>: its profile file (the supported
+      // <CODEX_HOME>/<profile>.config.toml form; the legacy [profiles.x] table is rejected by
+      // Codex) travels into the seat home. Absent globally = absent here: Codex default-layers
+      // it, and the preflight below then runs against the seat home itself.
       if (profile) {
-        const table = extractTomlTable(globalContent, `profiles.${profile}`);
-        if (!table) throw new Error(`Codex profile "${profile}" is not defined in ${globalConfig}`);
-        content = upsertTomlTable(content, `profiles.${profile}`, table);
+        const profileFile = `${profile}.config.toml`;
+        const source = nodePath.join(globalHome, profileFile);
+        const target = nodePath.join(seatHome, profileFile);
+        if (this.fs.exists(source)) this.fs.writeFile(target, this.fs.readFile(source));
       }
       this.fs.mkdirp(nodePath.dirname(seatConfig));
       this.fs.writeFile(seatConfig, content);
@@ -1519,12 +1524,13 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` via execSync
 // (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
 // verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string): Promise<CodexProfileProbeResult> {
+async function defaultProfilePreflight(profile: string, codexHome?: string): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const { execSync } = await import("node:child_process");
+  const env = codexHome ? { ...process.env, CODEX_HOME: codexHome } : process.env;
   const execFn = async (cmd: string) =>
     runSyncSite("codex.runtime.profile_preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, env })
     );
   return verifyCodexProfileLoads(profile, execFn);
 }
