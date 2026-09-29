@@ -99,7 +99,9 @@ function renderParts(item: QueueItem): string[] {
   if (item.body) lines.push("", item.body);
   if (item.humanDetail) lines.push("", item.humanDetail);
   if (isGateItem(item.tags)) lines.push("", "Reply to this message with: approve / revise <direction> / reject");
-  const ref = `\n\nref ${item.qitemId}`;
+  // only a short single-line id is embedded (a caller-chosen id could be any size); without it the
+  // reply correlates through the message map alone, and every part stays within the limit
+  const ref = /^[\w.:@-]{1,128}$/.test(item.qitemId) ? `\n\nref ${item.qitemId}` : "";
   return splitMessage(lines.join("\n"), TELEGRAM_LIMIT - ref.length).map((part) => part + ref);
 }
 
@@ -226,7 +228,8 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       const p = parseTelegramUpdate(u, allow);
       if (p.ok) {
         const ev: SlackEvent = { type: "message", user: String(p.userId), text: p.text, ts: `tg-${p.updateId}`, channel: String(p.chatId), ...(p.replyToMessageId ? { thread_ts: String(p.replyToMessageId) } : {}) };
-        const ref = refOf(p.replyToBotText, String(p.userId));
+        // a quoted ref counts only when the quoted message is OUR bot's (never another bot's)
+        const ref = p.replyToBotText && p.replyToFromId === (await ownBotId()) ? refOf(p.replyToBotText, String(p.userId)) : undefined;
         if (ref) refFromReply.set(ev.ts!, ref);
         const r = await router.route(ev).finally(() => refFromReply.delete(ev.ts!));
         if (r.replyResolution === "invalid-decision") {
@@ -242,6 +245,9 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     }
     return { handled: updates.length };
   }
+
+  let botId: number | undefined;
+  const ownBotId = async () => (botId ??= (await api.getMe()).id);
 
   let timer: ReturnType<typeof setInterval> | undefined;
   let busy = false;

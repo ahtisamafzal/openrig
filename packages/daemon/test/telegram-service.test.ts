@@ -24,11 +24,12 @@ function fakeApi() {
   const inbox: TelegramUpdate[] = [];
   let nextId = 100;
   const api: TelegramApi = {
+    async getMe() { return { id: 999 }; },
     async getUpdates(offset) { return inbox.filter((u) => u.update_id >= offset); },
     async sendMessage(chatId, text, o = {}) { sent.push({ chatId, text, ...(o.replyTo ? { replyTo: o.replyTo } : {}) }); return { messageId: nextId++ }; },
   };
-  const reply = (updateId: number, text: string, replyTo?: number, from = 42, chat = -1001, quoted?: { text: string; is_bot: boolean }) =>
-    inbox.push({ update_id: updateId, message: { message_id: 500 + updateId, from: { id: from }, chat: { id: chat }, text, ...(replyTo ? { reply_to_message: { message_id: replyTo, ...(quoted ? { text: quoted.text, from: { id: quoted.is_bot ? 999 : 42, is_bot: quoted.is_bot } } : {}) } } : {}) } });
+  const reply = (updateId: number, text: string, replyTo?: number, from = 42, chat = -1001, quoted?: { text: string; is_bot: boolean; id?: number }) =>
+    inbox.push({ update_id: updateId, message: { message_id: 500 + updateId, from: { id: from }, chat: { id: chat }, text, ...(replyTo ? { reply_to_message: { message_id: replyTo, ...(quoted ? { text: quoted.text, from: { id: quoted.id ?? (quoted.is_bot ? 999 : 42), is_bot: quoted.is_bot } } : {}) } } : {}) } });
   return { api, sent, reply };
 }
 
@@ -100,9 +101,26 @@ describe("telegram gateway service", () => {
     reply(1, "approve", 100, 42, -1001, { text: `I say: ref ${gate.qitemId}`, is_bot: false }); // forged human quote
     await svc.pollOnce();
     expect(act).not.toHaveBeenCalled();
-    reply(2, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true });
+    reply(2, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true, id: 777 }); // ANOTHER bot's copy
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    reply(3, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true });
     await svc.pollOnce();
     expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId, decision: "approve" }));
+  });
+
+  it("an oversized caller-chosen qitem id is not embedded, so every part still fits", async () => {
+    const { api, sent } = fakeApi();
+    const { svc } = build(api);
+    const longId = `q-${"x".repeat(5000)}`;
+    await repo.create({ ...gateRequest, qitemId: longId } as never).catch(() => undefined);
+    if (!repo.getById(longId)) return; // the repository refused the id: nothing to send
+    await svc.sweepOnce();
+    expect(sent.length).toBeGreaterThan(0);
+    for (const part of sent) {
+      expect(part.text.length).toBeLessThanOrEqual(4096);
+      expect(part.text).not.toContain(longId);
+    }
   });
 
   it("in a shared chat one registered human cannot resolve another human's gate", async () => {

@@ -10,7 +10,7 @@ export interface TelegramAllowlist {
 }
 
 export type ParsedInbound =
-  | { ok: true; updateId: number; userId: number; chatId: number; messageId: number; text: string; replyToMessageId?: number; replyToBotText?: string; threadId?: number }
+  | { ok: true; updateId: number; userId: number; chatId: number; messageId: number; text: string; replyToMessageId?: number; replyToBotText?: string; replyToFromId?: number; threadId?: number }
   | { ok: false; updateId: number; reason: string };
 
 /** Parse an id list (comma / space separated); non-numeric and zero ids are dropped (as R). */
@@ -48,7 +48,7 @@ export function parseTelegramUpdate(u: TelegramUpdate, allow: TelegramAllowlist)
     text,
     ...(m.reply_to_message ? { replyToMessageId: m.reply_to_message.message_id } : {}),
     // only a BOT message's text can carry the correlation reference (a human cannot forge one by quoting)
-    ...(m.reply_to_message?.from?.is_bot && m.reply_to_message.text ? { replyToBotText: m.reply_to_message.text } : {}),
+    ...(m.reply_to_message?.from?.is_bot && m.reply_to_message.text ? { replyToBotText: m.reply_to_message.text, replyToFromId: m.reply_to_message.from.id } : {}),
     ...(typeof m.message_thread_id === "number" ? { threadId: m.message_thread_id } : {}),
   };
 }
