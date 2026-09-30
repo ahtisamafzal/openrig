@@ -172,6 +172,28 @@ describe("telegram gateway service", () => {
     expect(sent).toHaveLength(parts); // nothing re-sent afterwards
   });
 
+  it("a started multipart delivery is always finished, even if the human went away meanwhile (a deferral never strands a fragment)", async () => {
+    const { api, sent } = fakeApi();
+    let prefs: Record<string, unknown> = { deliveryClass: "B" };
+    const reg = () => ({ ok: true as const, entities: [{ ...registry.entities[0]!, prefs }] });
+    const repo2 = new QueueRepository(db, new EventBus(db), { loadHumanRegistry: reg as never });
+    const svc = buildTelegramService({ home, queueRepo: repo2, env, api, loadRegistry: reg as never });
+    const gate = await repo2.create({ ...gateRequest, tags: ["arete-gate", "escalation"], body: "x".repeat(9000) }); // an escalation: "away" defers it
+    const realSend = api.sendMessage.bind(api);
+    let calls = 0;
+    api.sendMessage = async (chatId, text, o) => {
+      if (++calls === 2) throw new Error("telegram 502");
+      return realSend(chatId, text, o);
+    };
+    await svc.sweepOnce();
+    expect(sent).toHaveLength(1);
+    prefs = { deliveryClass: "B", availability: "away" }; // now the policy DEFERS a gate by 30 minutes
+    await svc.sweepOnce();
+    expect(sent.length).toBeGreaterThanOrEqual(3); // the rest arrived anyway
+    expect(sent.slice(1).every((m) => m.replyTo === 100)).toBe(true);
+    expect(gate.qitemId).toBeTruthy();
+  });
+
   it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
     const { api } = fakeApi();
     const { svc } = build(api);

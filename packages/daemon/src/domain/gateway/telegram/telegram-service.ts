@@ -296,8 +296,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
         human: { entityId: human.entityId, deliveryClass: human.prefs.deliveryClass, availability: resolveAvailability(human.prefs) },
         dials: { minimumLevelThatPosts: cfg.minimumLevelThatPosts, minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts },
       });
-      if (d.outcome !== "interrupt" && d.outcome !== "notify") continue;
-      if (d.deferMinutes !== undefined) continue;
+      // a delivery already STARTED (a part is on the human's screen) is always finished, whatever
+      // the policy says now — never leave them holding a fragment without the rest
+      const started = [...seen].some((id) => id.startsWith(`${key}#part`));
+      if (!started && d.outcome !== "interrupt" && d.outcome !== "notify") continue;
+      if (!started && d.deferMinutes !== undefined) continue;
       try {
         let root: number | undefined;
         putRef(refToken(item.qitemId), item.qitemId); // durable BEFORE the send
