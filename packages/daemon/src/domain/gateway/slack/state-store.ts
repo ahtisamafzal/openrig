@@ -16,7 +16,9 @@
 //                     with received recorded before filtering and a final disposition.
 //
 // FS + clock are injected so the whole thing is unit-testable with no real disk.
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 export interface StateFsOps {
@@ -25,45 +27,78 @@ export interface StateFsOps {
   writeFileSync(p: string, data: string): void;
   rename(from: string, to: string): void; // atomic same-dir replace
   mkdirp(dir: string): void;
-  /** Cross-process exclusive section over `p` (returns the release). Absent = single process. */
-  lock?(p: string): () => void;
+  /** Cross-process exclusive section over `p` (returns the release; throws LockTimeout when it
+   *  cannot be had in `waitMs`). Absent = single process. */
+  lock?(p: string, waitMs?: number): () => void;
+  /** Files in `dir` (for side files). Absent = none. */
+  list?(dir: string): string[];
+  unlink?(p: string): void;
+  /** Exclusive create (fails if `p` exists). */
+  createExclusive?(p: string, data: string): void;
 }
 
-const LOCK_WAIT_MS = 10_000;
-const LOCK_STALE_MS = 30_000;
+export class LockTimeout extends Error {}
+
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM"; // exists, owned by someone else
+  }
+};
+
 /**
- * A short, synchronous cross-process lock: `<p>.lock` created exclusively. Holders only do a few
- * synchronous file operations, so a lock older than LOCK_STALE_MS was left by a crashed process and
- * is removed. ponytail: two waiters can both judge the same crashed lock stale in the same instant;
- * the window needs a crash first, and the journal operations it guards are merge-safe.
+ * A short, synchronous cross-process lock: `<p>.lock` created exclusively, recording an owner
+ * token + pid + host. It is never stolen from a LIVE holder (however long it pauses): only a
+ * holder verified dead (same host, pid gone) — or a lock left torn/empty by a crash — is taken
+ * over, by an atomic rename (one contender wins). Release unlinks only the caller's own token.
+ * A contender that cannot get it in `waitMs` gets LockTimeout (callers fall back, never lose data).
  */
-function fileLock(p: string): () => void {
+function fileLock(p: string, waitMs = 10_000): () => void {
   const lockPath = `${p}.lock`;
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const token = `${process.pid}-${randomUUID()}`;
+  const deadline = Date.now() + waitMs;
   const nap = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lockPath, "wx"));
+      const fd = fs.openSync(lockPath, "wx");
+      try {
+        fs.writeSync(fd, JSON.stringify({ token, pid: process.pid, host: os.hostname() }));
+      } finally {
+        fs.closeSync(fd);
+      }
       return () => {
         try {
-          fs.unlinkSync(lockPath);
+          if ((JSON.parse(fs.readFileSync(lockPath, "utf8")) as { token?: string }).token === token) fs.unlinkSync(lockPath);
         } catch {
-          /* already gone */
+          /* gone, or no longer ours: nothing to release */
         }
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      try {
-        if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          fs.unlinkSync(lockPath);
-          continue;
-        }
-      } catch {
-        continue; // released between our open and stat
-      }
-      if (Date.now() > deadline) throw new Error(`journal lock ${lockPath} is held`);
-      Atomics.wait(nap, 0, 0, 5);
     }
+    let holder: { pid?: number; host?: string } | null = null;
+    let age = 0;
+    try {
+      age = Date.now() - fs.statSync(lockPath).mtimeMs;
+      holder = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: number; host?: string };
+    } catch {
+      holder = null; // torn (a crash between create and write) or released meanwhile
+    }
+    const dead = holder ? holder.host === os.hostname() && typeof holder.pid === "number" && !pidAlive(holder.pid) : age > 2_000;
+    if (dead) {
+      try {
+        const aside = `${lockPath}.dead-${token}`;
+        fs.renameSync(lockPath, aside); // atomic: one contender removes it
+        fs.unlinkSync(aside);
+      } catch {
+        /* another contender took it over first */
+      }
+      continue;
+    }
+    if (Date.now() > deadline) throw new LockTimeout(`journal lock ${lockPath} is held by a live process`);
+    Atomics.wait(nap, 0, 0, 5);
   }
 }
 
@@ -76,6 +111,9 @@ export const nodeStateFs: StateFsOps = {
     fs.mkdirSync(dir, { recursive: true });
   },
   lock: fileLock,
+  list: (dir) => fs.readdirSync(dir),
+  unlink: (p) => fs.unlinkSync(p),
+  createExclusive: (p, d) => fs.writeFileSync(p, d, { flag: "wx" }),
 };
 
 function parseLines(raw: string): unknown[] {
@@ -166,17 +204,36 @@ export class DeadLetterStore<T = unknown> {
     private readonly file: string,
     private readonly fsops: StateFsOps = nodeStateFs,
     private readonly now: () => Date = () => new Date(),
+    private readonly lockWaitMs = 10_000,
   ) {}
+
+  /** Side files: entries appended while the journal lock could not be had (see append). */
+  private sideFiles(): string[] {
+    const dir = path.dirname(this.file);
+    const prefix = `${path.basename(this.file)}.side-`;
+    try {
+      return (this.fsops.list?.(dir) ?? []).filter((f) => f.startsWith(prefix)).map((f) => path.join(dir, f));
+    } catch {
+      return [];
+    }
+  }
 
   append(ev: T, attempts: number): void {
     this.fsops.mkdirp(path.dirname(this.file));
+    const line = JSON.stringify({ ev, at: this.now().toISOString(), attempts } satisfies DeadLetterEntry<T>) + "\n";
     // under the journal lock: an append can never land between another process's read and replace
-    const release = this.fsops.lock?.(this.file);
+    let release: (() => void) | undefined;
     try {
-      this.fsops.appendFileSync(
-        this.file,
-        JSON.stringify({ ev, at: this.now().toISOString(), attempts } satisfies DeadLetterEntry<T>) + "\n",
-      );
+      release = this.fsops.lock?.(this.file, this.lockWaitMs);
+    } catch (err) {
+      if (!(err instanceof LockTimeout) || !this.fsops.createExclusive) throw err;
+      // the lock is held by a live (paused) process: never lose the entry — write it to its own
+      // uniquely named side file (no lock needed); reads include it and the next settle folds it in
+      this.fsops.createExclusive(`${this.file}.side-${process.pid}-${randomUUID()}.jsonl`, line);
+      return;
+    }
+    try {
+      this.fsops.appendFileSync(this.file, line);
     } finally {
       release?.();
     }
@@ -192,29 +249,33 @@ export class DeadLetterStore<T = unknown> {
     const key = (e: DeadLetterEntry<T>) => `${e.at}\u0000${JSON.stringify(e.ev)}`;
     const outcome = new Map(results.map((r) => [key(r.entry), r.outcome]));
     this.fsops.mkdirp(path.dirname(this.file));
-    const release = this.fsops.lock?.(this.file);
+    const release = this.fsops.lock?.(this.file, this.lockWaitMs); // a timeout skips this settle (retried next pass)
     try {
+      const sides = this.sideFiles();
       const next: DeadLetterEntry<T>[] = [];
       for (const e of this.readAll()) {
         const o = outcome.get(key(e));
         if (o === "done") continue;
         next.push(o === "retry" ? { ...e, attempts: e.attempts + 1 } : e);
       }
-      this.replaceAll(next);
+      this.replaceAll(next); // side-file entries are folded into the journal...
+      for (const f of sides) this.fsops.unlink?.(f); // ...then removed (a crash between: a harmless duplicate)
     } finally {
       release?.();
     }
   }
 
-  /** Non-destructive read of all durable entries. */
+  /** Non-destructive read of all durable entries (the journal and any side files). */
   readAll(): DeadLetterEntry<T>[] {
-    let raw: string;
-    try {
-      raw = this.fsops.readFileSync(this.file);
-    } catch {
-      return [];
+    const out: DeadLetterEntry<T>[] = [];
+    for (const f of [this.file, ...this.sideFiles()]) {
+      try {
+        out.push(...(parseLines(this.fsops.readFileSync(f)) as DeadLetterEntry<T>[]));
+      } catch {
+        /* absent */
+      }
     }
-    return parseLines(raw) as DeadLetterEntry<T>[];
+    return out;
   }
 
   /** Atomically replace the durable set (temp-write + rename). Callers outside settle() must

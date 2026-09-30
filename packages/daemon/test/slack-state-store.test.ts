@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SeenStore, DeadLetterStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import { SeenStore, DeadLetterStore, nodeStateFs, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
+import { tmpdir, hostname } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 // In-memory FS fake — models append/write/read + a fixed clock, no real disk.
 function memFs(): StateFsOps & { files: Map<string, string> } {
@@ -131,5 +135,43 @@ describe("Slice-11 DeadLetterStore — inbound never-drop, interruption-safe (it
     expect(d.readAll()).toEqual([]);
     d.replaceAll([]); // no-op, no throw
     expect(d.readAll()).toEqual([]);
+  });
+});
+
+describe("DeadLetterStore — the cross-process journal lock", () => {
+  const fresh = () => join(mkdtempSync(join(tmpdir(), "dl-lock-")), "dead.jsonl");
+  const clk = () => new Date("2026-09-30T00:00:00Z");
+
+  it("a LIVE holder paused past any age is never stolen from; the append goes to a side file, nothing lost", () => {
+    const file = fresh();
+    writeFileSync(`${file}.lock`, JSON.stringify({ token: "paused", pid: process.pid, host: hostname() })); // alive
+    const d = new DeadLetterStore<{ ts: string }>(file, nodeStateFs, clk, 50);
+    d.append({ ts: "a" }, 1);
+    d.append({ ts: "b" }, 1);
+    expect(JSON.parse(readFileSync(`${file}.lock`, "utf8")).token).toBe("paused"); // not stolen
+    expect(d.readAll().map((e) => e.ev.ts).sort()).toEqual(["a", "b"]); // readable from the side files
+    // once the holder releases, a settle folds the side files into the journal and removes them
+    unlinkSync(`${file}.lock`); // the paused holder resumes and releases
+    d.settle([{ entry: d.readAll().find((e) => e.ev.ts === "a")!, outcome: "done" }]);
+    expect(d.readAll().map((e) => e.ev.ts)).toEqual(["b"]);
+    expect(readdirSync(join(file, "..")).filter((f) => f.includes(".side-"))).toEqual([]);
+  });
+
+  it("a fresh orphan lock of a DEAD process (a crash just now) is recovered at once", () => {
+    const file = fresh();
+    const dead = spawnSync(process.execPath, ["-e", "0"]).pid!; // a pid that has exited
+    writeFileSync(`${file}.lock`, JSON.stringify({ token: "crashed", pid: dead, host: hostname() }));
+    const d = new DeadLetterStore<{ ts: string }>(file, nodeStateFs, clk, 50);
+    d.append({ ts: "x" }, 1);
+    expect(readFileSync(file, "utf8")).toContain('"x"'); // in the journal itself, not a side file
+    expect(existsSync(`${file}.lock`)).toBe(false); // released
+  });
+
+  it("release removes only the caller's own lock", () => {
+    const file = fresh();
+    const release = nodeStateFs.lock!(file);
+    writeFileSync(`${file}.lock`, JSON.stringify({ token: "someone-else", pid: process.pid, host: hostname() }));
+    release();
+    expect(JSON.parse(readFileSync(`${file}.lock`, "utf8")).token).toBe("someone-else");
   });
 });
