@@ -195,6 +195,20 @@ describe("DeadLetterStore — the cross-process journal lock (generations)", () 
     expect(existsSync(`${file}.lock.2`)).toBe(false);
   });
 
+  it("a crashed holder's pid REUSED by another live process is recognised and taken over", () => {
+    const file = fresh();
+    // the pid is alive (this test process), but the recorded start time is not this process's
+    writeFileSync(`${file}.lock.1`, JSON.stringify({ token: "crashed", pid: process.pid, host: hostname(), started: 1_000 }));
+    const release = fileLock(file, 5_000);
+    expect(existsSync(`${file}.lock.2`)).toBe(true);
+    release();
+    // the same pid WITH its real start time is a live holder: never taken over
+    const live = fresh();
+    const releaseLive = fileLock(live);
+    expect(() => fileLock(live, 50)).toThrow(/held by a live process/);
+    releaseLive();
+  });
+
   it("release frees only the caller's own generation", () => {
     const file = fresh();
     const release = fileLock(file);

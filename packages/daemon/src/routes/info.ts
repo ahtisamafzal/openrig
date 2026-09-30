@@ -11,7 +11,10 @@ import { getOpenRigInstallRoot } from "../domain/cwd-resolution.js";
  * per-company isolation: two URLs can alias one daemon) compare it with their configuration.
  */
 const DAEMON_ID = /^openrig-[0-9a-f-]{36}$/;
-export function getDaemonId(home = process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig")): string {
+export function getDaemonId(
+  home = process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
+  opts: { platform?: NodeJS.Platform; fsyncDir?: (dir: string) => void } = {},
+): string {
   const file = path.join(home, "daemon-id");
   const read = () => {
     const id = fs.readFileSync(file, "utf8").trim();
@@ -38,15 +41,22 @@ export function getDaemonId(home = process.env["OPENRIG_HOME"] || process.env["R
   } finally {
     fs.rmSync(tmp, { force: true });
   }
+  const fsyncDir =
+    opts.fsyncDir ??
+    ((dir: string) => {
+      const dfd = fs.openSync(dir, "r");
+      try {
+        fs.fsyncSync(dfd);
+      } finally {
+        fs.closeSync(dfd);
+      }
+    });
   try {
-    const dfd = fs.openSync(home, "r");
-    try {
-      fs.fsyncSync(dfd);
-    } finally {
-      fs.closeSync(dfd);
-    }
-  } catch {
-    /* directories cannot be fsynced on Windows; the file itself is */
+    fsyncDir(home);
+  } catch (err) {
+    // Windows cannot fsync a directory (the file itself is durable there); everywhere else a failed
+    // directory fsync means the new name may not survive a crash: never report an unsettled identity
+    if ((opts.platform ?? process.platform) !== "win32") throw err;
   }
   return read();
 }

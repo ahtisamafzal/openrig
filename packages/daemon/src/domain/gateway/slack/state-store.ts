@@ -16,6 +16,7 @@
 //                     with received recorded before filtering and a final disposition.
 //
 // FS + clock are injected so the whole thing is unit-testable with no real disk.
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -38,6 +39,28 @@ export interface StateFsOps {
 }
 
 export class LockTimeout extends Error {}
+
+/** When THIS process started (recorded by lock holders beside their pid). */
+const SELF_STARTED = Math.round(Date.now() - process.uptime() * 1000);
+/**
+ * When process `pid` started (ms), or undefined when it cannot be told (then a live pid is trusted
+ * as the holder: conservative). Linux: the /proc entry's ctime; Windows: Get-Process StartTime
+ * (hidden window, bounded). Used only to detect PID REUSE of a crashed holder's pid.
+ */
+export function processStartMs(pid: number): number | undefined {
+  if (pid === process.pid) return SELF_STARTED;
+  try {
+    if (process.platform === "linux") return fs.statSync(`/proc/${pid}`).ctimeMs;
+    if (process.platform === "win32") {
+      const out = execFileSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`], { windowsHide: true, timeout: 5_000, encoding: "utf8" });
+      const t = Date.parse(out.trim());
+      return Number.isFinite(t) ? t : undefined;
+    }
+  } catch {
+    /* gone or unreadable */
+  }
+  return undefined;
+}
 
 const pidAlive = (pid: number) => {
   try {
@@ -73,14 +96,26 @@ export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () =>
     }
   };
   const genFile = (g: number) => path.join(dir, `${prefix}${g}`);
+  const startChecked = new Map<string, boolean>(); // one start-time lookup per holder per attempt
   for (;;) {
     const all = gens();
     const top = all.reduce((a, g) => Math.max(a, g), 0);
     let free = top === 0 || fs.existsSync(`${genFile(top)}.free`);
     if (!free) {
       try {
-        const h = JSON.parse(fs.readFileSync(genFile(top), "utf8")) as { pid?: number; host?: string };
-        free = h.host === os.hostname() && typeof h.pid === "number" && !pidAlive(h.pid);
+        const h = JSON.parse(fs.readFileSync(genFile(top), "utf8")) as { pid?: number; host?: string; started?: number };
+        if (h.host === os.hostname() && typeof h.pid === "number") {
+          if (!pidAlive(h.pid)) free = true;
+          else if (typeof h.started === "number") {
+            // the pid is alive — but is it still the SAME process? (a crashed holder's pid reused)
+            const key = `${h.pid}:${h.started}`;
+            if (!startChecked.has(key)) {
+              const actual = processStartMs(h.pid);
+              startChecked.set(key, actual !== undefined && Math.abs(actual - h.started) > 5_000);
+            }
+            free = startChecked.get(key)!;
+          }
+        }
       } catch {
         if (!fs.existsSync(genFile(top))) continue; // tidied meanwhile: re-evaluate
         free = false; // unreadable (never half-written: generations are published complete): not ours to judge
@@ -92,7 +127,7 @@ export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () =>
       const tmp = path.join(dir, `${prefix}${mine}.${token}.tmp`);
       const fd = fs.openSync(tmp, "wx");
       try {
-        fs.writeSync(fd, JSON.stringify({ token, pid: process.pid, host: os.hostname() }));
+        fs.writeSync(fd, JSON.stringify({ token, pid: process.pid, host: os.hostname(), started: SELF_STARTED }));
         fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);

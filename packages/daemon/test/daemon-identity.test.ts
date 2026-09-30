@@ -22,6 +22,14 @@ describe("daemon identity (Arete per-company isolation)", () => {
     expect(() => getDaemonId(home)).toThrow(/corrupt/);
   });
 
+  it("a failed directory fsync is fatal where directories can be fsynced (never an unsettled identity)", () => {
+    const eio = () => {
+      throw Object.assign(new Error("EIO"), { code: "EIO" });
+    };
+    expect(() => getDaemonId(mkdtempSync(join(tmpdir(), "rig-eio-")), { platform: "linux", fsyncDir: eio })).toThrow(/EIO/);
+    expect(getDaemonId(mkdtempSync(join(tmpdir(), "rig-win-")), { platform: "win32", fsyncDir: eio })).toMatch(/^openrig-/);
+  });
+
   it("is reported by GET /api/info", async () => {
     const home = mkdtempSync(join(tmpdir(), "rig-info-"));
     const prior = process.env["OPENRIG_HOME"];
