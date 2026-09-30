@@ -209,6 +209,15 @@ describe("DeadLetterStore — the cross-process journal lock (generations)", () 
     releaseLive();
   });
 
+  it("a pid reused within seconds is still recognised (start times compare exactly)", () => {
+    const file = fresh();
+    const mine = processStartMs(process.pid)!;
+    writeFileSync(`${file}.lock.1`, JSON.stringify({ token: "crashed", pid: process.pid, host: hostname(), started: mine - 1 }));
+    const release = fileLock(file, 5_000);
+    expect(existsSync(`${file}.lock.2`)).toBe(true);
+    release();
+  });
+
   it("a live EXTERNAL holder is never judged a reused pid, even after a wall-clock correction", () => {
     const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
     const now = Date.now;

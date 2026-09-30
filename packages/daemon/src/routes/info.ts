@@ -22,27 +22,31 @@ export function getDaemonId(
     if (!DAEMON_ID.test(id)) throw new Error(`${file} is corrupt (${JSON.stringify(id.slice(0, 40))}); restore it or remove it deliberately`);
     return id;
   };
-  if (fs.existsSync(file)) return read();
+  // Reported only once COMMITTED: `<file>.committed` exists after the name was made durable. Any
+  // caller completes a pending commit; a failed barrier leaves the marker absent, so the next call
+  // retries it. The identity itself is never removed or replaced once linked.
+  const committed = `${file}.committed`;
+  if (fs.existsSync(committed)) return read();
   fs.mkdirSync(home, { recursive: true });
-  // durable before it is ever reported: written + fsynced to a temp file, then hard-linked into place
-  // (exclusive: racing starts agree), then the directory is fsynced where the platform allows
-  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  const fd = fs.openSync(tmp, "wx");
-  try {
-    fs.writeSync(fd, `openrig-${randomUUID()}`);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
+  if (!fs.existsSync(file)) {
+    // written + fsynced to a temp file, then hard-linked into place (exclusive: racing starts agree)
+    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    const fd = fs.openSync(tmp, "wx");
+    try {
+      fs.writeSync(fd, `openrig-${randomUUID()}`);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.linkSync(tmp, file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
   }
-  let created = false;
-  try {
-    fs.linkSync(tmp, file);
-    created = true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  } finally {
-    fs.rmSync(tmp, { force: true });
-  }
+  const id = read();
   const fsyncDir =
     opts.fsyncDir ??
     ((dir: string) => {
@@ -57,15 +61,16 @@ export function getDaemonId(
     fsyncDir(home);
   } catch (err) {
     // Windows cannot fsync a directory (the file itself is durable there); everywhere else a failed
-    // directory fsync means the new name may not survive a crash: never report an unsettled identity
-    // — and the name THIS call published is withdrawn, so the next call retries the whole barrier
-    // instead of taking the fast path to an identity whose directory entry was never confirmed
-    if ((opts.platform ?? process.platform) !== "win32") {
-      if (created) fs.rmSync(file, { force: true });
-      throw err;
-    }
+    // directory fsync means the name may not survive a crash: not committed, not reported
+    if ((opts.platform ?? process.platform) !== "win32") throw err;
   }
-  return read();
+  // the marker only records that the barrier passed (lost in a crash = the barrier simply reruns)
+  try {
+    fs.writeFileSync(committed, id, { flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  return id;
 }
 
 // GET /api/info — daemon-info surface for tactical CLI awareness paths

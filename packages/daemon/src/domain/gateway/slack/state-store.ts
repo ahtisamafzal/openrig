@@ -123,7 +123,8 @@ export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () =>
             const key = `${h.pid}:${h.started}`;
             if (!startChecked.has(key)) {
               const actual = processStartMs(h.pid);
-              startChecked.set(key, actual !== undefined && Math.abs(actual - h.started) > 5_000);
+              // exact: both values come from the same native per-process record (no clock skew to absorb)
+              startChecked.set(key, actual !== undefined && actual !== h.started);
             }
             free = startChecked.get(key)!;
           }

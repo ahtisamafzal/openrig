@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDaemonId, infoRoutes } from "../src/routes/info.js";
@@ -28,15 +28,45 @@ describe("daemon identity (Arete per-company isolation)", () => {
     };
     expect(() => getDaemonId(mkdtempSync(join(tmpdir(), "rig-eio-")), { platform: "linux", fsyncDir: eio })).toThrow(/EIO/);
     expect(getDaemonId(mkdtempSync(join(tmpdir(), "rig-win-")), { platform: "win32", fsyncDir: eio })).toMatch(/^openrig-/);
-    // a failed barrier is not skipped on the next call: the unsettled name was withdrawn, so the
-    // retry runs the barrier again (and, once it succeeds, reports a settled identity)
+    // a failed barrier is retried by the next call, and the identity never changes
     const home = mkdtempSync(join(tmpdir(), "rig-retry-"));
     expect(() => getDaemonId(home, { platform: "linux", fsyncDir: eio })).toThrow(/EIO/);
+    const linked = readFileSync(join(home, "daemon-id"), "utf8");
     let synced = 0;
     expect(() => getDaemonId(home, { platform: "linux", fsyncDir: (d) => { synced++; eio(d); } })).toThrow(/EIO/);
     expect(synced).toBe(1);
-    expect(getDaemonId(home, { platform: "linux", fsyncDir: () => { synced++; } })).toMatch(/^openrig-/);
+    expect(getDaemonId(home, { platform: "linux", fsyncDir: () => { synced++; } })).toBe(linked);
     expect(synced).toBe(2);
+    expect(getDaemonId(home, { platform: "linux", fsyncDir: eio })).toBe(linked); // committed: no barrier
+  });
+
+  it("a caller that observes the name mid-commit never reports it before the barrier passes", () => {
+    const home = mkdtempSync(join(tmpdir(), "rig-mid-"));
+    const eio = () => {
+      throw Object.assign(new Error("EIO"), { code: "EIO" });
+    };
+    let observed: unknown;
+    // the creator's barrier: a second caller arrives between link and fsync (its own barrier fails too)
+    expect(() =>
+      getDaemonId(home, {
+        platform: "linux",
+        fsyncDir: (d) => {
+          try {
+            observed = getDaemonId(home, { platform: "linux", fsyncDir: eio });
+          } catch (err) {
+            observed = err;
+          }
+          eio(d);
+        },
+      }),
+    ).toThrow(/EIO/);
+    expect(observed).toBeInstanceOf(Error); // it never returned the unsettled identity
+    // a contender that found the name already linked (EEXIST path) and failed its barrier leaves it
+    // uncommitted too: the next call runs the barrier
+    let synced = 0;
+    const id = getDaemonId(home, { platform: "linux", fsyncDir: () => { synced++; } });
+    expect(synced).toBe(1);
+    expect(id).toBe(readFileSync(join(home, "daemon-id"), "utf8"));
   });
 
   it("is reported by GET /api/info", async () => {
