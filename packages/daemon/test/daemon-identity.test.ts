@@ -52,6 +52,16 @@ describe("daemon identity (Arete per-company isolation)", () => {
     expect(() => getDaemonId(home)).toThrow(/corrupt/);
   });
 
+  it("an identity and a committed marker that disagree are refused, never resolved silently", () => {
+    const home = mkdtempSync(join(tmpdir(), "rig-split-"));
+    const id = getDaemonId(home);
+    const other = "openrig-00000000-0000-4000-8000-000000000000";
+    writeFileSync(join(home, "daemon-id.committed"), other); // e.g. a partial restore
+    expect(() => getDaemonId(home)).toThrow(/disagree/);
+    writeFileSync(join(home, "daemon-id.committed"), id);
+    expect(getDaemonId(home)).toBe(id);
+  });
+
   it("a caller that observes the name mid-commit never reports it before the barrier passes", () => {
     const home = mkdtempSync(join(tmpdir(), "rig-mid-"));
     const eio = () => {

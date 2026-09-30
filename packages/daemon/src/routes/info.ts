@@ -26,6 +26,14 @@ export function getDaemonId(
   // caller completes a pending commit; a failed barrier leaves the marker absent, so the next call
   // retries it. The identity itself is never removed or replaced once linked.
   const committed = `${file}.committed`;
+  // the two records must agree: a restore / rollback that left different identities is refused
+  // (never silently resolved — the restore path would later hand out the OTHER one)
+  const agreed = () => {
+    const id = read();
+    const kept = fs.readFileSync(committed, "utf8").trim();
+    if (kept !== id) throw new Error(`${file} (${id}) and ${committed} (${JSON.stringify(kept.slice(0, 48))}) disagree; restore one of them deliberately`);
+    return id;
+  };
   if (fs.existsSync(committed)) {
     // the marker carries the identity (written + fsynced): if a crash kept the marker but lost the
     // earlier daemon-id entry (Windows cannot fsync the directory), the identity is restored from it
@@ -34,7 +42,7 @@ export function getDaemonId(
       if (!DAEMON_ID.test(kept)) throw new Error(`${committed} is corrupt and ${file} is missing; restore it deliberately`);
       publishDurably(file, kept);
     }
-    return read();
+    return agreed();
   }
   fs.mkdirSync(home, { recursive: true });
   if (!fs.existsSync(file)) publishDurably(file, `openrig-${randomUUID()}`);
@@ -59,7 +67,7 @@ export function getDaemonId(
   // the marker records that the barrier passed and carries the identity, published the same durable
   // way (lost in a crash = the barrier simply reruns; kept without daemon-id = restored from it)
   publishDurably(committed, id);
-  return id;
+  return agreed(); // (a marker another caller published first must carry this same identity)
 }
 
 /** Publish `data` at `file` complete and exclusively: written + fsynced to a unique temp file, then
