@@ -25,7 +25,7 @@ const redact = (s: string, token: string) => (token ? s.split(token).join("<toke
 
 export interface TelegramApi {
   /** The bot's own identity (its user id authenticates our own messages when they are quoted). */
-  getMe(): Promise<{ id: number }>;
+  getMe(): Promise<{ id: number; username?: string }>;
   getUpdates(offset: number, timeoutSeconds?: number): Promise<TelegramUpdate[]>;
   sendMessage(chatId: number, text: string, opts?: { replyTo?: number }): Promise<{ messageId: number }>;
 }
@@ -56,7 +56,10 @@ export function telegramApi(token: string, opts: { fetchImpl?: FetchImpl; base?:
   }
 
   return {
-    getMe: async () => ({ id: (await call<{ id: number }>("getMe", {})).id }),
+    getMe: async () => {
+      const me = await call<{ id: number; username?: string }>("getMe", {});
+      return { id: me.id, ...(me.username ? { username: me.username } : {}) };
+    },
     getUpdates: (offset, timeoutSeconds = 0) => call<TelegramUpdate[]>("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message"] }),
     async sendMessage(chatId, text, o = {}) {
       const r = await call<{ message_id: number }>("sendMessage", { chat_id: chatId, text, ...(o.replyTo ? { reply_parameters: { message_id: o.replyTo } } : {}) });

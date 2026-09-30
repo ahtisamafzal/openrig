@@ -24,7 +24,7 @@ function fakeApi() {
   const inbox: TelegramUpdate[] = [];
   let nextId = 100;
   const api: TelegramApi = {
-    async getMe() { return { id: 999 }; },
+    async getMe() { return { id: 999, username: "AreteBot" }; },
     async getUpdates(offset) { return inbox.filter((u) => u.update_id >= offset); },
     async sendMessage(chatId, text, o = {}) { sent.push({ chatId, text, ...(o.replyTo ? { replyTo: o.replyTo } : {}) }); return { messageId: nextId++ }; },
   };
@@ -77,6 +77,43 @@ describe("telegram gateway service", () => {
     await svc.pollOnce();
     expect(sent.at(-1)!.text).toContain("Usage: /run <flow> <task>");
     expect(calls).toHaveLength(2);
+  });
+
+  it("/run with an unclear answer is retried with the SAME run id until Arete answers; never 'Not started'", async () => {
+    const { api, sent, reply } = fakeApi();
+    const bodies: string[] = [];
+    let answer: () => Response | never = () => { throw new Error("socket hang up after the commit"); };
+    const fetchImpl = async (_url: string, init?: RequestInit) => (bodies.push(String(init?.body)), answer());
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => registry as never });
+    reply(11, "/run design-check a settings page");
+    await svc.pollOnce();
+    expect(sent.at(-1)!.text).toContain("Retrying the same run automatically");
+    expect(sent.at(-1)!.text).not.toContain("Not started");
+    answer = () => new Response("<html>bad gateway</html>", { status: 502 }); // still unclear
+    await svc.retryPendingRuns!();
+    answer = () => new Response(JSON.stringify({ ok: true, runId: "telegram-11", status: "exists" }), { status: 202 });
+    await svc.retryPendingRuns!();
+    expect(sent.at(-1)!.text).toContain("Started design-check (run telegram-11)");
+    expect(new Set(bodies).size).toBe(1); // every attempt was the identical signed request
+    expect(bodies).toHaveLength(3);
+    await svc.retryPendingRuns!();
+    expect(bodies).toHaveLength(3); // nothing left pending
+  });
+
+  it("/run@otherbot is not ours (handled as an ordinary message); /run@AreteBot is", async () => {
+    const { api, reply } = fakeApi();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true, runId: "r" }), { status: 202 }));
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => registry as never });
+    reply(21, "/run@OtherBot design-check x");
+    await svc.pollOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(repo.list({ activeOnly: false, limit: 100 })).toHaveLength(1); // landed like any message
+    reply(22, "/run@arete_BOT design-check x");
+    await svc.pollOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    reply(23, "/run@AreteBot design-check x");
+    await svc.pollOnce();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("/run is refused without the shared secret, and from anyone who is not a registered human", async () => {

@@ -30,8 +30,10 @@ export const SECRET_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN";
 export const SECRET_TELEGRAM_CHAT = "TELEGRAM_CHAT_ID";
 /** Shared with Arete (its ARETE_INBOUND_WEBHOOK_SECRET): signs `/run` starts to /arete/signals/inbound. */
 export const SECRET_ARETE_INBOUND = "ARETE_INBOUND_WEBHOOK_SECRET";
-/** `/run <flow> <task>` (the bot-name suffix Telegram adds in groups is accepted). */
-const RUN_COMMAND = /^\/run(?:@\w+)?(?:\s+([\w-]+))?(?:\s+([\s\S]*))?$/i;
+/** `/run <flow> <task>`; a `@botname` suffix (groups) must name THIS bot. */
+const RUN_COMMAND = /^\/run(?:@(\w+))?(?:\s+([\w-]+))?(?:\s+([\s\S]*))?$/i;
+/** Ticks an unanswered `/run` is retried before the human is told to check (5 s ticks: ~5 min). */
+const RUN_RETRY_TICKS = 60;
 
 /** How many open requests the "which one?" answer names. */
 const OPEN_GATES_SHOWN = 10;
@@ -61,6 +63,8 @@ export interface TelegramService {
   status(): Record<string, unknown>;
   sweepOnce(): Promise<{ sent: string[]; failed: string[] }>;
   pollOnce(): Promise<{ handled: number }>;
+  /** Retry `/run` starts whose outcome Arete did not answer clearly (absent when inert). */
+  retryPendingRuns?(): Promise<void>;
 }
 
 /** sent message -> the qitem it asked about (reply correlation survives restarts). */
@@ -442,10 +446,71 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
 
   const areteSecret = resolveSecret(SECRET_ARETE_INBOUND, lookup);
   const areteUrl = (opts.env?.ARETE_URL ?? process.env.ARETE_URL ?? "http://127.0.0.1:4111").replace(/\/+$/, "");
+  /** A `/run` whose outcome Arete has not answered clearly yet: retried with the SAME signed body. */
+  type PendingRun = { flow: string; runId: string; body: string; chatId: number; messageId: number; tries: number };
+  const pendingFile = path.join(state, "telegram-run-pending.json");
+  const loadPending = (): PendingRun[] => {
+    try { return JSON.parse(fs.readFileSync(pendingFile, "utf8")) as PendingRun[]; } catch { return []; }
+  };
+  const savePending = (runs: PendingRun[]) => {
+    const tmp = `${pendingFile}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(runs));
+    fs.renameSync(tmp, pendingFile);
+  };
+  /**
+   * Post one start. 'done' when Arete answered definitively (started, already started, or a clear
+   * refusal) and the human was told; 'unknown' when it may or may not have started (timeout, lost
+   * response, 5xx, unreadable body) — the same body is retried: its run id makes Arete idempotent.
+   */
+  async function postRun(r: PendingRun): Promise<"done" | "unknown"> {
+    const say = (text: string) => api.sendMessage(r.chatId, text, { replyTo: r.messageId }).catch(() => undefined);
+    let res: Response;
+    let out: { ok?: boolean; runId?: string; error?: string; status?: string } | null;
+    try {
+      res = await (opts.fetchImpl ?? fetch)(`${areteUrl}/arete/signals/inbound`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-hub-signature-256": `sha256=${createHmac("sha256", areteSecret!).update(r.body).digest("hex")}` },
+        body: r.body,
+        signal: AbortSignal.timeout(10_000),
+      });
+      out = (await res.json().catch(() => null)) as typeof out;
+    } catch (e) {
+      log(`telegram /run ${r.flow} (${r.runId}): ${(e as Error).message}`);
+      return "unknown";
+    }
+    if (res.ok && out?.ok) {
+      await say(`Started ${r.flow} (run ${out.runId ?? r.runId}). Any approval it needs will come here.`);
+      return "done";
+    }
+    const definite = out?.error && (res.status < 500 || out.error === "arete_inbound_webhook_secret_missing");
+    if (!definite) return "unknown";
+    if (out!.error === "invalid_workflowId" || out!.error === "inbound_workflow_not_found") await say(`Not started: there is no flow "${r.flow}" that can be run from here.`);
+    else await say(`Not started: Arete answered ${res.status} (${out!.error}).`);
+    return "done";
+  }
+  /** Retry every unclear `/run` (each tick, before new updates); give up loudly after RUN_RETRY_TICKS. */
+  async function retryPendingRuns(): Promise<void> {
+    const pending = loadPending();
+    if (!pending.length) return;
+    const left: PendingRun[] = [];
+    for (const r of pending) {
+      if ((await postRun(r)) === "done") continue;
+      if (++r.tries < RUN_RETRY_TICKS) {
+        left.push(r);
+        continue;
+      }
+      await api
+        .sendMessage(r.chatId, `No clear answer from Arete for ${r.flow} (run ${r.runId}). Check Studio for that run before sending /run again.`, { replyTo: r.messageId })
+        .catch(() => undefined);
+    }
+    savePending(left);
+  }
+
   /**
    * `/run <flow> <task>` from a registered human: start the flow through Arete's signed inbound
    * endpoint and answer in the chat. The run id is the Telegram update id, so a re-polled update
-   * (crash before the offset write) reaches the run already started, never a second one.
+   * (crash before the offset write) or an automatic retry reaches the run already started, never a
+   * second one.
    */
   async function runCommand(p: { updateId: number; userId: number; chatId: number; messageId: number }, flow?: string, task?: string): Promise<void> {
     const say = (text: string) => api.sendMessage(p.chatId, text, { replyTo: p.messageId }).catch(() => undefined);
@@ -462,23 +527,12 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       await say(`Not started: ${SECRET_ARETE_INBOUND} is not configured for the daemon.`);
       return;
     }
-    const body = JSON.stringify({ workflowId: flow, inputData: { task: task.trim() }, source: "telegram", runId: `telegram-${p.updateId}` });
-    const signature = `sha256=${createHmac("sha256", areteSecret).update(body).digest("hex")}`;
-    try {
-      const res = await (opts.fetchImpl ?? fetch)(`${areteUrl}/arete/signals/inbound`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-hub-signature-256": signature },
-        body,
-        signal: AbortSignal.timeout(10_000),
-      });
-      const out = (await res.json().catch(() => ({}))) as { ok?: boolean; runId?: string; error?: string };
-      if (res.ok && out.ok) await say(`Started ${flow} (run ${out.runId}). Any approval it needs will come here.`);
-      else if (out.error === "invalid_workflowId" || out.error === "inbound_workflow_not_found") await say(`Not started: there is no flow "${flow}" that can be run from here.`);
-      else await say(`Not started: Arete answered ${res.status}${out.error ? ` (${out.error})` : ""}.`);
-    } catch (e) {
-      log(`telegram /run ${flow}: ${(e as Error).message}`);
-      await say(`Not started: Arete is not reachable at ${areteUrl}.`);
-    }
+    const runId = `telegram-${p.updateId}`;
+    const r: PendingRun = { flow, runId, body: JSON.stringify({ workflowId: flow, inputData: { task: task.trim() }, source: "telegram", runId }), chatId: p.chatId, messageId: p.messageId, tries: 0 };
+    if ((await postRun(r)) === "done") return;
+    // durable BEFORE the offset moves past this update: the retry survives a daemon restart
+    savePending([...loadPending().filter((x) => x.runId !== runId), r]);
+    await say(`Arete did not answer clearly for ${flow} (run ${runId}). Retrying the same run automatically — do not send /run again.`);
   }
 
   async function pollOnce(): Promise<{ handled: number }> {
@@ -488,9 +542,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     const updates = await api.getUpdates(offset);
     for (const u of updates) {
       const p = parseTelegramUpdate(u, allow);
-      const run = p.ok && p.replyToMessageId === undefined ? RUN_COMMAND.exec(p.text) : null;
+      const cmd = p.ok && p.replyToMessageId === undefined ? RUN_COMMAND.exec(p.text) : null;
+      // a `/run@otherbot` is not ours: it is handled like any other message
+      const run = cmd && (!cmd[1] || cmd[1].toLowerCase() === (await ownBotName())?.toLowerCase()) ? cmd : null;
       if (p.ok && run) {
-        await runCommand(p, run[1], run[2]);
+        await runCommand(p, run[2], run[3]);
       } else if (p.ok) {
         const ev: SlackEvent = { type: "message", user: String(p.userId), text: p.text, ts: `tg-${p.updateId}`, channel: String(p.chatId), ...(p.replyToMessageId ? { thread_ts: String(p.replyToMessageId) } : {}) };
         // a quoted ref counts only when the quoted message is OUR bot's (never another bot's)
@@ -526,8 +582,9 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     return { handled: updates.length };
   }
 
-  let botId: number | undefined;
-  const ownBotId = async () => (botId ??= (await api.getMe()).id);
+  let me: { id: number; username?: string } | undefined;
+  const ownBotId = async () => (me ??= await api.getMe()).id;
+  const ownBotName = async () => (me ??= await api.getMe()).username;
 
   let timer: ReturnType<typeof setInterval> | undefined;
   let busy = false;
@@ -536,6 +593,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     if (busy) return; // one poller per daemon; a second daemon gets Telegram's 409, surfaced below
     busy = true;
     try {
+      await retryPendingRuns();
       await pollOnce();
       await router.retryDeadLetters();
       await sweepOnce();
@@ -564,6 +622,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     status: () => ({ platform: "telegram", ready, running: timer !== undefined, lastError }),
     sweepOnce,
     pollOnce,
+    retryPendingRuns,
   };
 }
 
