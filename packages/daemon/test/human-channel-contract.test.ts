@@ -213,6 +213,52 @@ describe("a failed gate resolution is retried", () => {
     await router.retryDeadLetters();
     expect(resolved(g.qitemId)).toBe(1);
   });
+
+  it("a failure dead-lettered WHILE a retry pass runs survives the pass's replace; overlapping passes join", async () => {
+    const dead = new DeadLetterStore<SlackEvent>(join(home, "race-dead.jsonl"));
+    let release!: () => void;
+    const paused = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const slow: typeof resolver = async (input) => {
+      calls++;
+      if (calls === 1) throw new Error("down"); // the first reply dead-letters
+      if (calls === 2) {
+        await paused; // the retry pass is mid-flight, after readAll()
+        throw new Error("still down");
+      }
+      if (calls === 3) throw new Error("down again"); // the concurrent live reply dead-letters
+      return resolver(input);
+    };
+    const map = new ThreadSeatMap(db);
+    const router = new InboundRouter({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+      seen: new SeenStore(join(home, "race-seen.jsonl")),
+      deadLetter: dead,
+      destination: "operator-agent@kernel",
+      resolveSender: (u) => {
+        const r = resolveSlackHandle(u, registry.entities);
+        return r.kind === "registered" ? { admitted: true, source: r.address } : { admitted: false, teaching: r.error };
+      },
+      resolveRoute: makeThreadRouteResolver({ map, unroutedDestination: "operator-agent@kernel" }),
+      resolveHumanReply: slow,
+    });
+    const g1 = await gate();
+    const g2 = await gate();
+    map.open({ threadTs: "T-R1", channel: "C", human: "human-founder@external", seat: "author@rig", conversationId: g1.qitemId });
+    map.open({ threadTs: "T-R2", channel: "C", human: "human-founder@external", seat: "author@rig", conversationId: g2.qitemId });
+    expect((await router.route({ type: "message", user: "UFOUNDER", text: "approve", ts: "8.1", thread_ts: "T-R1", channel: "C" })).disposition).toBe("dead-lettered");
+    const pass = router.retryDeadLetters();
+    const joined = router.retryDeadLetters();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await router.route({ type: "message", user: "UFOUNDER", text: "approve", ts: "8.2", thread_ts: "T-R2", channel: "C" })).disposition).toBe("dead-lettered");
+    release();
+    expect(await joined).toEqual(await pass);
+    expect(dead.readAll().map((e) => e.ev.ts).sort()).toEqual(["8.1", "8.2"]);
+    await router.retryDeadLetters();
+    expect(resolved(g1.qitemId)).toBe(1);
+    expect(resolved(g2.qitemId)).toBe(1);
+    expect(dead.readAll()).toEqual([]);
+  });
 });
 
 describe("outbound-only channels", () => {

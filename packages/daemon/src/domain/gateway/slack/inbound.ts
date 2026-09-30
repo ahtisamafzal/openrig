@@ -106,6 +106,7 @@ export interface InboundDeps {
 
 export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-ts double-dispatch guard (item 8)
+  private draining: Promise<{ retried: number; landed: number }> | null = null; // one retry pass at a time
   constructor(private readonly deps: InboundDeps) {}
 
   private summaryOf(ev: SlackEvent, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
@@ -270,6 +271,15 @@ export class InboundRouter {
    * Does NOT go through route() (which would double-append) — uses attemptLand.
    */
   async retryDeadLetters(): Promise<{ retried: number; landed: number }> {
+    // passes are serialized (connect + interval timers can overlap): a caller joins the running pass
+    if (this.draining) return this.draining;
+    this.draining = this.drainOnce().finally(() => {
+      this.draining = null;
+    });
+    return this.draining;
+  }
+
+  private async drainOnce(): Promise<{ retried: number; landed: number }> {
     const entries = this.deps.deadLetter.readAll();
     if (entries.length === 0) return { retried: 0, landed: 0 };
     this.deps.log?.(`retrying ${entries.length} dead-letter(s)`);
@@ -283,7 +293,10 @@ export class InboundRouter {
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       // reason === "dup" (in-flight) → drop; a concurrent path owns it
     }
-    this.deps.deadLetter.replaceAll(stillFailing); // atomic; original intact until here
+    // route() may have appended new failures while this pass awaited: re-read and keep everything
+    // past the snapshot. Re-read + replace are synchronous, so no append can land in between.
+    const appended = this.deps.deadLetter.readAll().slice(entries.length);
+    this.deps.deadLetter.replaceAll([...stillFailing, ...appended]); // atomic; original intact until here
     return { retried: entries.length, landed };
   }
 }
