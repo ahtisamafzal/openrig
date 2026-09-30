@@ -1,0 +1,32 @@
+name: Windows gate
+
+# Roadmap 6.5 — the Windows release gate for the daemon. It runs the SAME documented local command
+# (`npm run test:windows -w packages/daemon`), not a CI-only script. The set is the daemon suites
+# verified green on Windows (gateway, human channels, secrets, notifications); it widens as the
+# Phase 1 Windows backlog closes, and never runs funded providers or a real herdr.
+
+on:
+  pull_request:
+  push:
+    branches: [main, windows-herdr]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  daemon-windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Build daemon
+        run: npm run build -w packages/daemon
+      - name: Windows test gate
+        run: npm run test:windows -w packages/daemon
