@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SeenStore, DeadLetterStore, nodeStateFs, fileLock, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, utimesSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -184,6 +184,15 @@ describe("DeadLetterStore — the cross-process journal lock (generations)", () 
     expect(existsSync(`${file}.lock.3`)).toBe(false); // B never got in
     releaseA!();
     expect(existsSync(`${file}.lock.2.free`)).toBe(true);
+  });
+
+  it("an old, unreadable generation is never taken over by age (a live owner may be behind it)", () => {
+    const file = fresh();
+    writeFileSync(`${file}.lock.1`, '{"token":"paus'); // partial content, as a paused writer would leave
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(`${file}.lock.1`, old, old);
+    expect(() => fileLock(file, 50)).toThrow(/held by a live process/);
+    expect(existsSync(`${file}.lock.2`)).toBe(false);
   });
 
   it("release frees only the caller's own generation", () => {

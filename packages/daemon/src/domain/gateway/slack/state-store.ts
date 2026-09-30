@@ -54,9 +54,10 @@ const pidAlive = (pid: number) => {
  * host) when generation N is free — released (a `.free` marker its owner wrote), its owner verified
  * dead (same host, pid gone), or left torn by a crash. Exactly one contender can create N+1, so two
  * contenders that judged the same holder dead cannot both win, and a LIVE holder (however long it
- * pauses) is never taken over. Older generations are tidied by the next holder. A contender that
- * cannot get it in `waitMs` gets LockTimeout (callers fall back, never lose data).
- * ponytail: a generation left TORN (a crash between its create and its write) counts as free after 2 s.
+ * pauses) is never taken over. A generation is PUBLISHED complete: its owner record is written and
+ * fsynced to a unique temp file, then hard-linked to the generation name (exclusive + atomic), so a
+ * generation is never visible half-written and nothing is ever judged by age. Older generations are
+ * tidied by the next holder. A contender that cannot get it in `waitMs` gets LockTimeout.
  */
 export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () => void } = {}): () => void {
   const dir = path.dirname(p);
@@ -81,21 +82,32 @@ export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () =>
         const h = JSON.parse(fs.readFileSync(genFile(top), "utf8")) as { pid?: number; host?: string };
         free = h.host === os.hostname() && typeof h.pid === "number" && !pidAlive(h.pid);
       } catch {
-        try {
-          free = Date.now() - fs.statSync(genFile(top)).mtimeMs > 2_000; // torn by a crash
-        } catch {
-          continue; // changed meanwhile: re-evaluate
-        }
+        if (!fs.existsSync(genFile(top))) continue; // tidied meanwhile: re-evaluate
+        free = false; // unreadable (never half-written: generations are published complete): not ours to judge
       }
     }
     if (free) {
       hooks.afterJudge?.();
       const mine = top + 1;
+      const tmp = path.join(dir, `${prefix}${mine}.${token}.tmp`);
+      const fd = fs.openSync(tmp, "wx");
       try {
-        fs.writeFileSync(genFile(mine), JSON.stringify({ token, pid: process.pid, host: os.hostname() }), { flag: "wx" });
+        fs.writeSync(fd, JSON.stringify({ token, pid: process.pid, host: os.hostname() }));
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      try {
+        fs.linkSync(tmp, genFile(mine)); // publish complete, exclusively
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "EEXIST") continue; // another contender won N+1
         throw err;
+      } finally {
+        try {
+          fs.unlinkSync(tmp);
+        } catch {
+          /* gone */
+        }
       }
       for (const g of all) {
         if (g >= top) continue; // tidy only generations no contender can still be judging

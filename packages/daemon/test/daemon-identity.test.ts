@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDaemonId, infoRoutes } from "../src/routes/info.js";
@@ -12,6 +12,14 @@ describe("daemon identity (Arete per-company isolation)", () => {
     expect(id).toMatch(/^openrig-[0-9a-f-]{36}$/);
     expect(getDaemonId(a)).toBe(id);
     expect(getDaemonId(b)).not.toBe(id);
+  });
+
+  it("a corrupt identity is refused, never silently re-minted", () => {
+    const home = mkdtempSync(join(tmpdir(), "rig-bad-"));
+    writeFileSync(join(home, "daemon-id"), "");
+    expect(() => getDaemonId(home)).toThrow(/corrupt/);
+    writeFileSync(join(home, "daemon-id"), "garbage");
+    expect(() => getDaemonId(home)).toThrow(/corrupt/);
   });
 
   it("is reported by GET /api/info", async () => {
