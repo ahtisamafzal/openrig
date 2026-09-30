@@ -527,6 +527,16 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(await findingsFor(parked.qitemId)).toHaveLength(0); // parks legitimately wait (S03 territory)
   });
 
+  it("A1 NET — a row waiting on a HUMAN's decision is never an unclaimed-obligation finding, however old", async () => {
+    const human = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", summary: "Approve the plan?", evidenceRef: "docs/plan.md", body: "decide", nudge: false });
+    ageCreated(human.qitemId, 600);
+    const agent = await mkRow();
+    ageCreated(agent.qitemId, 600);
+    await runSweep({ resolveOrchestrator: () => "orch@r" });
+    expect(await findingsFor(human.qitemId)).toHaveLength(0);
+    expect(await findingsFor(agent.qitemId)).toHaveLength(1); // an agent seat's stale obligation still is
+  });
+
   it("NO CASCADE: finding rows never themselves produce findings — a re-sweep after routing mints zero new rows", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });

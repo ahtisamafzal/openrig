@@ -20,7 +20,7 @@ import { makeQueuePorts, type QueueItem } from "../slack/queue-access.js";
 import { InboundRouter, type SlackEvent } from "../slack/inbound.js";
 import { loadHumanRegistry, resolveSlackHandle, type HumanFragment } from "../human-registry.js";
 import { decideDelivery, isEscalationClass, resolveAvailability } from "../delivery-rules-engine.js";
-import { isGateItem } from "../gate-decision.js";
+import { ARETE_GATE_TAG, isGateItem, parseGateDecision } from "../gate-decision.js";
 import type { QueueRepository } from "../../queue-repository.js";
 import { telegramApi, type TelegramApi, type FetchImpl } from "./api.js";
 import { parseIds, parseTelegramUpdate } from "./inbound.js";
@@ -228,6 +228,37 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const humanOf = (item: QueueItem, entities: readonly HumanFragment[]) =>
     entities.find((e) => e.entityId === (item.destinationSession ?? "").split("@")[0]);
 
+  /** The delivery receipt (the prefix every delivery-ledger reader matches; `platform=telegram`
+   *  names the transport). Once per notification key; an informational update closes on delivery,
+   *  exactly as on Slack — never a human decision. */
+  function recordPosted(item: QueueItem, key: string, messageId: number): void {
+    if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(item.qitemId, key)) return;
+    opts.queueRepo.update({
+      qitemId: item.qitemId,
+      actorSession: "daemon@kernel",
+      ...(item.humanIntent === "update" ? { state: "done" as const, closureReason: "no-follow-on" } : {}),
+      transitionNote: [
+        "slack-owner-notification-posted",
+        `notification_key=${key}`,
+        `level=${item.ownerNotificationLevel ?? "RECORD"}`,
+        `kind=${item.ownerNotificationKind ?? "unclassified"}`,
+        `message_ts=${messageId}`,
+        `thread_ts=${messageId}`,
+        "platform=telegram",
+      ].join(" "),
+    });
+  }
+
+  /** The open approval gates `sender` (a Telegram user id) is the human for. */
+  function openGatesOf(sender: string): Array<{ qitemId: string; seat: string; summary: string }> {
+    const out: Array<{ qitemId: string; seat: string; summary: string }> = [];
+    for (const q of opts.queueRepo.list({ tag: ARETE_GATE_TAG, state: ["pending", "in-progress", "blocked"], limit: 500 })) {
+      const hit = ownedBy(q.qitemId, sender);
+      if (hit) out.push({ ...hit, summary: q.summary ?? q.qitemId });
+    }
+    return out;
+  }
+
   async function sweepOnce(): Promise<{ sent: string[]; failed: string[] }> {
     const reg = registry();
     if (!reg.ok) return { sent: [], failed: [] };
@@ -257,6 +288,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
           messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);
         }
         delivered.mark(key, "delivered");
+        recordPosted(item, key, root!);
         sent.push(item.qitemId);
       } catch (e) {
         failed.push(item.qitemId);
@@ -276,11 +308,25 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       if (p.ok) {
         const ev: SlackEvent = { type: "message", user: String(p.userId), text: p.text, ts: `tg-${p.updateId}`, channel: String(p.chatId), ...(p.replyToMessageId ? { thread_ts: String(p.replyToMessageId) } : {}) };
         // a quoted ref counts only when the quoted message is OUR bot's (never another bot's)
-        const ref = p.replyToBotText && p.replyToFromId === (await ownBotId()) ? refOf(p.replyToBotText, String(p.userId)) : undefined;
-        if (ref) refFromReply.set(ev.ts!, ref);
-        const r = await router.route(ev).finally(() => refFromReply.delete(ev.ts!));
-        if (r.replyResolution === "invalid-decision") {
-          await api.sendMessage(p.chatId, "Not recorded as a decision. Reply with: approve / revise <direction> / reject", { replyTo: p.messageId }).catch(() => undefined);
+        let ref = p.replyToBotText && p.replyToFromId === (await ownBotId()) ? refOf(p.replyToBotText, String(p.userId)) : undefined;
+        let ambiguous = false;
+        if (!ref && p.replyToMessageId === undefined && parseGateDecision(p.text)) {
+          const open = openGatesOf(String(p.userId));
+          if (open.length === 1) ref = { qitemId: open[0]!.qitemId, seat: open[0]!.seat };
+          else if (open.length > 1) {
+            ambiguous = true;
+            const list = open.slice(0, 10).map((g, i) => `${i + 1}. ${g.summary}`).join("\n");
+            await api
+              .sendMessage(p.chatId, `You have ${open.length} open requests — nothing was recorded. Reply (swipe left) to the one you mean:\n${list}`, { replyTo: p.messageId })
+              .catch(() => undefined);
+          }
+        }
+        if (!ambiguous) {
+          if (ref) refFromReply.set(ev.ts!, ref);
+          const r = await router.route(ev).finally(() => refFromReply.delete(ev.ts!));
+          if (r.replyResolution === "invalid-decision") {
+            await api.sendMessage(p.chatId, "Not recorded as a decision. Reply with: approve / revise <direction> / reject", { replyTo: p.messageId }).catch(() => undefined);
+          }
         }
       } else {
         log(`telegram update ${u.update_id} refused: ${p.reason}`);

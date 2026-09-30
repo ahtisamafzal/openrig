@@ -28,6 +28,7 @@ import type Database from "better-sqlite3";
 import { deriveCrossHostSuccessorId, type QueueItem, type QueueRepository } from "./queue-repository.js";
 import { stalledPickupFinding } from "./queue-pickup.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { isHumanSeatSessionRef } from "./session-name.js";
 import { loadHostRegistry } from "./hosts/hosts-registry-reader.js";
 
 export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
@@ -413,6 +414,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const { qitem_id } of unclaimedRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
+      // A row addressed to a HUMAN is waiting on a person's decision, not a stalled seat: its
+      // delivery is the gateway's (a failed one surfaces in half 2 above) and its reminders are the
+      // owner-notification policies'. It is never an "unclaimed obligation" finding.
+      if (isHumanSeatSessionRef(row.destinationSession ?? "")) continue;
       const actionableAt = pendingSince(deps.db, row.qitemId) ?? row.tsCreated;
       if (actionableAt > cutoff) continue;
       if (hasLiveLadder(deps.db, row.qitemId)) continue;

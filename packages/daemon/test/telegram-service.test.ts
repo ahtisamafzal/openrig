@@ -85,6 +85,41 @@ describe("telegram gateway service", () => {
     expect(landed.map((q) => q.destinationSession)).toEqual(["author@rig", "author@rig"]);
   });
 
+  it("a delivered notification records the delivery receipt, so the ledger (and the stuck sweep) sees it as posted", async () => {
+    const { api } = fakeApi();
+    const { svc } = build(api);
+    const gate = await repo.create(gateRequest);
+    await svc.sweepOnce();
+    const notes = repo.transitionLog.listForQitem(gate.qitemId).map((t) => t.transitionNote ?? "");
+    expect(notes.filter((n) => n.startsWith("slack-owner-notification-posted ") && n.includes("platform=telegram"))).toHaveLength(1);
+    expect(repo.findUndelivered().map((q) => q.qitemId)).not.toContain(gate.qitemId);
+    await svc.sweepOnce(); // exactly once
+    expect(repo.transitionLog.listForQitem(gate.qitemId).filter((t) => (t.transitionNote ?? "").startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+  });
+
+  it("a plain decision (no Reply) resolves the human's ONLY open gate; with several open nothing is guessed", async () => {
+    const { api, sent, reply } = fakeApi();
+    const { svc, act } = build(api);
+    const first = await repo.create(gateRequest);
+    await svc.sweepOnce();
+    reply(1, "approve");
+    await svc.pollOnce();
+    expect(act).toHaveBeenCalledWith(expect.objectContaining({ verb: "resolve", qitemId: first.qitemId, decision: "approve" }));
+
+    act.mockClear();
+    await repo.create({ ...gateRequest, summary: "Second gate" });
+    await repo.create({ ...gateRequest, summary: "Third gate" });
+    reply(2, "approve");
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    expect(sent.at(-1)!.text).toContain("open requests — nothing was recorded");
+    expect(sent.at(-1)!.text).toContain("Second gate");
+    // ordinary chat (not a decision word) still goes to the inbound destination, never to a gate
+    reply(3, "status please");
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+  });
+
   it("fails closed on unknown users and chats; the offset survives a restart without re-landing", async () => {
     const { api, reply } = fakeApi();
     const { svc } = build(api);
