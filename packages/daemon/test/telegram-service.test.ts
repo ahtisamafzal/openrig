@@ -49,6 +49,50 @@ describe("telegram gateway service", () => {
     svc: buildTelegramService({ home, queueRepo: repo, env, api, loadRegistry: () => registry as never, resolveHumanReply: makeHumanReplyResolver(repo, { act }) }),
   });
 
+  it("/run <flow> <task> from the registered human starts the flow through Arete's signed inbound, and says so", async () => {
+    const { createHmac } = await import("node:crypto");
+    const { api, sent, reply } = fakeApi();
+    const calls: Array<{ url: string; body: string; sig: string }> = [];
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: String(init?.body), sig: (init?.headers as Record<string, string>)["x-hub-signature-256"]! });
+      const wf = JSON.parse(String(init?.body)).workflowId;
+      return wf === "design-check"
+        ? new Response(JSON.stringify({ ok: true, runId: "telegram-7", workflowId: wf }), { status: 202 })
+        : new Response(JSON.stringify({ ok: false, error: "invalid_workflowId" }), { status: 400 });
+    };
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s3cret", ARETE_URL: "http://arete:4111/" }, api, fetchImpl, loadRegistry: () => registry as never });
+    reply(7, "/run design-check a settings page\nwith dark mode");
+    await svc.pollOnce();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("http://arete:4111/arete/signals/inbound");
+    expect(JSON.parse(calls[0]!.body)).toEqual({ workflowId: "design-check", inputData: { task: "a settings page\nwith dark mode" }, source: "telegram", runId: "telegram-7" });
+    expect(calls[0]!.sig).toBe(`sha256=${createHmac("sha256", "s3cret").update(calls[0]!.body).digest("hex")}`);
+    expect(sent.at(-1)).toMatchObject({ chatId: -1001, replyTo: 507 });
+    expect(sent.at(-1)!.text).toContain("Started design-check (run telegram-7)");
+    expect(repo.list({ activeOnly: false, limit: 100 })).toHaveLength(0); // a command, not a message to the lead seat
+    reply(8, "/run nope do it");
+    await svc.pollOnce();
+    expect(sent.at(-1)!.text).toContain('no flow "nope"');
+    reply(9, "/run");
+    await svc.pollOnce();
+    expect(sent.at(-1)!.text).toContain("Usage: /run <flow> <task>");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("/run is refused without the shared secret, and from anyone who is not a registered human", async () => {
+    const { api, sent, reply } = fakeApi();
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 202 }));
+    const svc = buildTelegramService({ home, queueRepo: repo, env, api, fetchImpl, loadRegistry: () => registry as never });
+    reply(1, "/run design-check x");
+    await svc.pollOnce();
+    expect(sent.at(-1)!.text).toContain("ARETE_INBOUND_WEBHOOK_SECRET is not configured");
+    const stranger = { ok: true as const, entities: [] };
+    const svc2 = buildTelegramService({ home: mkdtempSync(join(tmpdir(), "telegram-gw-")), queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => stranger as never });
+    reply(2, "/run design-check x");
+    await svc2.pollOnce();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("the refs journal exists (created durably at build) before any notification is sent", async () => {
     const { existsSync } = await import("node:fs");
     const { api, sent } = fakeApi();

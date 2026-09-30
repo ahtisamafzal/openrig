@@ -10,7 +10,7 @@
 // marked only after every part is sent).
 
 import fs from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import path from "node:path";
 import type { GatewayWire } from "../gateway-subsystem.js";
 import { loadConfig } from "../slack/config.js";
@@ -28,6 +28,10 @@ import { splitMessage, TELEGRAM_LIMIT } from "./split.js";
 
 export const SECRET_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN";
 export const SECRET_TELEGRAM_CHAT = "TELEGRAM_CHAT_ID";
+/** Shared with Arete (its ARETE_INBOUND_WEBHOOK_SECRET): signs `/run` starts to /arete/signals/inbound. */
+export const SECRET_ARETE_INBOUND = "ARETE_INBOUND_WEBHOOK_SECRET";
+/** `/run <flow> <task>` (the bot-name suffix Telegram adds in groups is accepted). */
+const RUN_COMMAND = /^\/run(?:@\w+)?(?:\s+([\w-]+))?(?:\s+([\s\S]*))?$/i;
 
 /** How many open requests the "which one?" answer names. */
 const OPEN_GATES_SHOWN = 10;
@@ -436,6 +440,47 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     return { sent, failed };
   }
 
+  const areteSecret = resolveSecret(SECRET_ARETE_INBOUND, lookup);
+  const areteUrl = (opts.env?.ARETE_URL ?? process.env.ARETE_URL ?? "http://127.0.0.1:4111").replace(/\/+$/, "");
+  /**
+   * `/run <flow> <task>` from a registered human: start the flow through Arete's signed inbound
+   * endpoint and answer in the chat. The run id is the Telegram update id, so a re-polled update
+   * (crash before the offset write) reaches the run already started, never a second one.
+   */
+  async function runCommand(p: { updateId: number; userId: number; chatId: number; messageId: number }, flow?: string, task?: string): Promise<void> {
+    const say = (text: string) => api.sendMessage(p.chatId, text, { replyTo: p.messageId }).catch(() => undefined);
+    const reg = registry();
+    if (!reg.ok || resolveSlackHandle(String(p.userId), reg.entities, "telegram").kind !== "registered") {
+      await say("Not started: you are not a registered human.");
+      return;
+    }
+    if (!flow || !task?.trim()) {
+      await say("Usage: /run <flow> <task>\ne.g. /run design-check a settings page for notifications");
+      return;
+    }
+    if (!areteSecret) {
+      await say(`Not started: ${SECRET_ARETE_INBOUND} is not configured for the daemon.`);
+      return;
+    }
+    const body = JSON.stringify({ workflowId: flow, inputData: { task: task.trim() }, source: "telegram", runId: `telegram-${p.updateId}` });
+    const signature = `sha256=${createHmac("sha256", areteSecret).update(body).digest("hex")}`;
+    try {
+      const res = await (opts.fetchImpl ?? fetch)(`${areteUrl}/arete/signals/inbound`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-hub-signature-256": signature },
+        body,
+        signal: AbortSignal.timeout(10_000),
+      });
+      const out = (await res.json().catch(() => ({}))) as { ok?: boolean; runId?: string; error?: string };
+      if (res.ok && out.ok) await say(`Started ${flow} (run ${out.runId}). Any approval it needs will come here.`);
+      else if (out.error === "invalid_workflowId" || out.error === "inbound_workflow_not_found") await say(`Not started: there is no flow "${flow}" that can be run from here.`);
+      else await say(`Not started: Arete answered ${res.status}${out.error ? ` (${out.error})` : ""}.`);
+    } catch (e) {
+      log(`telegram /run ${flow}: ${(e as Error).message}`);
+      await say(`Not started: Arete is not reachable at ${areteUrl}.`);
+    }
+  }
+
   async function pollOnce(): Promise<{ handled: number }> {
     const reg = registry();
     const allow = { userIds: reg.ok ? telegramHandles(reg.entities) : new Set<number>(), chatIds };
@@ -443,7 +488,10 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     const updates = await api.getUpdates(offset);
     for (const u of updates) {
       const p = parseTelegramUpdate(u, allow);
-      if (p.ok) {
+      const run = p.ok && p.replyToMessageId === undefined ? RUN_COMMAND.exec(p.text) : null;
+      if (p.ok && run) {
+        await runCommand(p, run[1], run[2]);
+      } else if (p.ok) {
         const ev: SlackEvent = { type: "message", user: String(p.userId), text: p.text, ts: `tg-${p.updateId}`, channel: String(p.chatId), ...(p.replyToMessageId ? { thread_ts: String(p.replyToMessageId) } : {}) };
         // a quoted ref counts only when the quoted message is OUR bot's (never another bot's)
         let ref = p.replyToBotText && p.replyToFromId === (await ownBotId()) ? refOf(p.replyToBotText, String(p.userId)) : undefined;
