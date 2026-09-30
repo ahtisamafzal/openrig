@@ -40,6 +40,9 @@ export interface TelegramServiceOpts {
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<ReplyResolution>;
   log?: (msg: string) => void;
   /** Test seams. */
+  /** Directory fsync (default: open + fsync the directory; Windows has no directory handle). */
+  fsyncDir?: (dir: string) => void;
+  platform?: NodeJS.Platform;
   api?: TelegramApi;
   fetchImpl?: FetchImpl;
   env?: NodeJS.ProcessEnv;
@@ -109,6 +112,15 @@ function renderParts(item: QueueItem): string[] {
   if (isGateItem(item.tags)) lines.push("", "Reply to this message with: approve / revise <direction> / reject");
   const ref = `\n\nref ${refToken(item.qitemId)}`;
   return splitMessage(lines.join("\n"), TELEGRAM_LIMIT - ref.length).map((part) => part + ref);
+}
+
+function fsyncDirectory(dir: string): void {
+  const fd = fs.openSync(dir, "r");
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 export function buildTelegramService(opts: TelegramServiceOpts): TelegramService {
@@ -290,6 +302,23 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       fs.closeSync(fd);
     }
     fs.renameSync(tmp, file);
+    // the new NAME is durable before part 1 goes out: a power loss must not lose the plan of a
+    // message the human is already reading (Windows has no directory fsync — NTFS journals the rename)
+    try {
+      (opts.fsyncDir ?? fsyncDirectory)(plansDir);
+    } catch (err) {
+      if ((opts.platform ?? process.platform) !== "win32") throw err;
+    }
+  }
+  /** Temp files a crash left between fsync and rename hold message text: removed every sweep. */
+  function dropStaleTemps(): void {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(plansDir);
+    } catch {
+      return;
+    }
+    for (const f of files) if (f.includes(".json.tmp-")) fs.rmSync(path.join(plansDir, f), { force: true });
   }
   const dropPlan = (key: string) => fs.rmSync(planFile(key), { force: true });
   function loadPlans(): Map<string, Plan> {
@@ -340,6 +369,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     const seen = delivered.load();
     const sent: string[] = [];
     const failed: string[] = [];
+    dropStaleTemps();
     const started = loadPlans();
 
     // 1. finish every started delivery first, whatever the alert list / episode / policy says now

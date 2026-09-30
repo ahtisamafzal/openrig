@@ -223,6 +223,33 @@ describe("telegram gateway service", () => {
     expect(stateText).not.toContain("x".repeat(200));
   });
 
+  it("a temp plan a crash left behind (before its rename) is removed; no message text survives", async () => {
+    const { mkdirSync, writeFileSync, readdirSync } = await import("node:fs");
+    const dir = join(home, "state", "telegram-plans");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "abc.json.tmp-99999"), JSON.stringify({ key: "old", parts: ["SECRET BODY TEXT"] }));
+    const { api } = fakeApi();
+    await build(api).svc.sweepOnce();
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("if the plan's directory entry cannot be made durable (off Windows), nothing is sent", async () => {
+    const { api, sent } = fakeApi();
+    const svc = buildTelegramService({
+      home, queueRepo: repo, env, api, loadRegistry: () => registry as never, platform: "linux",
+      fsyncDir: () => { throw Object.assign(new Error("EIO"), { code: "EIO" }); },
+    });
+    const gate = await repo.create(gateRequest);
+    expect((await svc.sweepOnce()).failed).toEqual([gate.qitemId]);
+    expect(sent).toHaveLength(0);
+    // on Windows (no directory handle) the same failure is tolerated and the message goes out
+    const win = buildTelegramService({
+      home, queueRepo: repo, env, api, loadRegistry: () => registry as never, platform: "win32",
+      fsyncDir: () => { throw Object.assign(new Error("EPERM"), { code: "EPERM" }); },
+    });
+    expect((await win.sweepOnce()).sent).toEqual([gate.qitemId]);
+  });
+
   it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
     const { api } = fakeApi();
     const { svc } = build(api);
