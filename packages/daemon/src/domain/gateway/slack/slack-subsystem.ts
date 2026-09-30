@@ -70,6 +70,14 @@ interface HumanReplyActionPort {
   act(input: { verb: "resolve"; qitemId: string; actorSession: string; decision: string }): Promise<unknown>;
 }
 
+/** 5.10: is `actor` (a human address) the human this item waits on? Session names compare by
+ *  their identity part (`human-x@kernel` and `human-x@external` are the same human). */
+function assignedTo(item: { destinationSession?: string | null; blockedOn?: string | null }, actor: string): boolean {
+  const who = (s: string | null | undefined) => (s ?? "").split("@")[0] ?? "";
+  const me = who(actor);
+  return !!me && (who(item.destinationSession) === me || who(item.blockedOn) === me);
+}
+
 /** Compose an inbound reply with Mission Control's existing human-park resolver.
  * A replay after the durable resolve but before inbound seen-mark is absorbed by
  * the typed transition, so the waiting owner is resumed exactly once. */
@@ -81,6 +89,9 @@ export function makeHumanReplyResolver(
     const target = queueRepo.getById(input.qitemId);
     if (target?.humanIntent === "update") return "not-applicable";
     if (!contract) return "not-applicable";
+    // 5.10: only the human the item is assigned to may resolve it — in a shared channel another
+    // registered human's reply lands as its own item and never resolves someone else's gate
+    if (target && !assignedTo(target, input.actorSession)) return "not-applicable";
     // 5.1: an Arete approval gate accepts only approve / revise / reject (any channel); anything else
     // never resolves it — the reply still lands as its own item, the gate keeps waiting
     if (isGateItem(target?.tags) && !parseGateDecision(input.decision)) return "invalid-decision";
