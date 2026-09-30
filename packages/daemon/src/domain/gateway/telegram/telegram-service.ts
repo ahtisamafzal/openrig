@@ -267,25 +267,78 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     return out;
   }
 
+  /**
+   * The exact message a delivery started with (text of every part, and who asked), written durably
+   * BEFORE part 1 is sent. A started delivery is finished from this record — not from the current
+   * alert list, episode or policy — so nothing that changes afterwards (a newer notification, a
+   * stricter dial, the item closing) can strand the rest of a message the human already sees.
+   */
+  const plans = new SeenStore(path.join(state, "telegram-plans.jsonl"));
+  type Plan = { key: string; qitemId: string; seat: string; parts: string[] };
+  const planId = (plan: Plan) => `plan:${JSON.stringify(plan)}`;
+  function loadPlans(): Map<string, Plan> {
+    const out = new Map<string, Plan>();
+    for (const id of plans.load()) {
+      if (!id.startsWith("plan:")) continue;
+      try {
+        const plan = JSON.parse(id.slice(5)) as Plan;
+        out.set(plan.key, plan);
+      } catch {
+        /* a torn line: ignored (the delivery it named re-plans from scratch) */
+      }
+    }
+    return out;
+  }
+
+  /** Send the parts of `plan` not yet sent (each recorded durably as it goes), then close it out. */
+  async function finish(plan: Plan, seen: Set<string>, item: QueueItem | null): Promise<void> {
+    let root: number | undefined;
+    for (let i = 0; i < plan.parts.length; i++) {
+      const done = [...seen].find((id) => id.startsWith(`${plan.key}#part${i}@`));
+      if (done) {
+        root ??= Number(done.slice(done.lastIndexOf("@") + 1));
+        continue;
+      }
+      // (a crash in the instant between a send and its record can repeat that one part: Telegram
+      // offers no idempotent send)
+      const { messageId } = await api.sendMessage(postChat!, plan.parts[i]!, root ? { replyTo: root } : {});
+      delivered.markDurable(`${plan.key}#part${i}@${messageId}`, "part-sent");
+      seen.add(`${plan.key}#part${i}@${messageId}`);
+      root ??= messageId;
+      messages.put(postChat!, messageId, plan.qitemId, plan.seat);
+    }
+    delivered.markDurable(`${plan.key}#sent`, "sent"); // fsynced BEFORE the receipt: never re-sent
+    if (item) recordPosted(item, plan.key, root ?? 0);
+    delivered.mark(plan.key, "delivered");
+  }
+
   async function sweepOnce(): Promise<{ sent: string[]; failed: string[] }> {
     const reg = registry();
     if (!reg.ok) return { sent: [], failed: [] };
     const seen = delivered.load();
     const sent: string[] = [];
     const failed: string[] = [];
+    const started = loadPlans();
+
+    // 1. finish every started delivery first, whatever the alert list / episode / policy says now
+    for (const plan of started.values()) {
+      if (seen.has(plan.key)) continue;
+      try {
+        await finish(plan, seen, opts.queueRepo.getById(plan.qitemId));
+        sent.push(plan.qitemId);
+      } catch (e) {
+        failed.push(plan.qitemId);
+        log(`telegram delivery of ${plan.qitemId} not finished: ${(e as Error).message} — resumed next sweep`);
+      }
+    }
+
+    // 2. new deliveries: the current alerts, as the policy decides
     for (const item of await ports.listHumanAlerts({ minimumLevel: cfg.minimumLevelThatPosts })) {
       const key = item.notificationKey ?? item.qitemId;
       const human = humanOf(item, reg.entities);
-      if (seen.has(key) || !human?.connectorBindings.some((b) => b.kind === "telegram")) continue;
-      if (seen.has(`${key}#sent`) || opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(item.qitemId, key)) {
-        // already delivered by an earlier sweep that stopped before its bookkeeping: heal, never re-send
-        try {
-          recordPosted(item, key, 0);
-          delivered.mark(key, "delivered");
-        } catch (e) {
-          failed.push(item.qitemId);
-          log(`telegram receipt for ${item.qitemId} not recorded: ${(e as Error).message} — retried next sweep`);
-        }
+      if (seen.has(key) || started.has(key) || !human?.connectorBindings.some((b) => b.kind === "telegram")) continue;
+      if (opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(item.qitemId, key)) {
+        delivered.mark(key, "delivered"); // receipted already (e.g. before this ledger existed)
         continue;
       }
       // ponytail: Telegram posts the immediate outcomes only; log/digest/deferred stay with the
@@ -296,39 +349,17 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
         human: { entityId: human.entityId, deliveryClass: human.prefs.deliveryClass, availability: resolveAvailability(human.prefs) },
         dials: { minimumLevelThatPosts: cfg.minimumLevelThatPosts, minimumLevelThatInterrupts: cfg.minimumLevelThatInterrupts },
       });
-      // a delivery already STARTED (a part is on the human's screen) is always finished, whatever
-      // the policy says now — never leave them holding a fragment without the rest
-      const started = [...seen].some((id) => id.startsWith(`${key}#part`));
-      if (!started && d.outcome !== "interrupt" && d.outcome !== "notify") continue;
-      if (!started && d.deferMinutes !== undefined) continue;
+      if (d.outcome !== "interrupt" && d.outcome !== "notify") continue;
+      if (d.deferMinutes !== undefined) continue;
       try {
-        let root: number | undefined;
         putRef(refToken(item.qitemId), item.qitemId); // durable BEFORE the send
-        // Each part is recorded durably (with its message id) the moment Telegram accepts it, so a
-        // failure or crash between parts resumes at the first UNSENT part — the parts already sent
-        // are never sent again. (A crash in the instant between a send and its record can still
-        // repeat that one part: Telegram offers no idempotent send.)
-        const partSent = (i: number) => [...seen].find((id) => id.startsWith(`${key}#part${i}@`));
-        const parts = renderParts(item);
-        for (let i = 0; i < parts.length; i++) {
-          const done = partSent(i);
-          if (done) {
-            root ??= Number(done.slice(done.lastIndexOf("@") + 1));
-            continue;
-          }
-          const { messageId } = await api.sendMessage(postChat!, parts[i]!, root ? { replyTo: root } : {});
-          delivered.markDurable(`${key}#part${i}@${messageId}`, "part-sent");
-          seen.add(`${key}#part${i}@${messageId}`);
-          root ??= messageId;
-          messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);
-        }
-        delivered.markDurable(`${key}#sent`, "sent"); // fsynced BEFORE the receipt: the whole message is never re-sent
-        recordPosted(item, key, root!);
-        delivered.mark(key, "delivered");
+        const plan: Plan = { key, qitemId: item.qitemId, seat: item.sourceSession ?? cfg.inboundDestination, parts: renderParts(item) };
+        plans.markDurable(planId(plan), "planned"); // the exact message, durable before part 1
+        await finish(plan, seen, item);
         sent.push(item.qitemId);
       } catch (e) {
         failed.push(item.qitemId);
-        log(`telegram delivery failed ${item.qitemId}: ${(e as Error).message} — retried next sweep`);
+        log(`telegram delivery failed ${item.qitemId}: ${(e as Error).message} — resumed next sweep`);
       }
     }
     return { sent, failed };
