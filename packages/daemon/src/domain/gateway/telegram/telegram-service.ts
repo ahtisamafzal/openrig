@@ -130,9 +130,19 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const delivered = new SeenStore(path.join(state, "telegram-delivered.jsonl"));
   const messages = new MessageMap(path.join(state, "telegram-message-map.jsonl"));
   const refsFile = path.join(state, "telegram-refs.jsonl");
+  // DURABLE before the send: the record is flushed to stable storage (fsync); a failure throws, so
+  // the notification is withheld and retried by the next sweep rather than sent uncorrelatable.
+  // ponytail: the parent directory entry is not fsynced (Windows has no directory fsync); the
+  // state directory already exists after the first run.
   const putRef = (token: string, qitemId: string) => {
     fs.mkdirSync(state, { recursive: true });
-    fs.appendFileSync(refsFile, JSON.stringify({ token, qitemId }) + "\n");
+    const fd = fs.openSync(refsFile, "a");
+    try {
+      fs.writeSync(fd, JSON.stringify({ token, qitemId }) + "\n");
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
   };
   const qitemForToken = (token: string): string | undefined => {
     let raw = "";
