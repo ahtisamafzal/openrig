@@ -34,6 +34,8 @@ export const SECRET_ARETE_INBOUND = "ARETE_INBOUND_WEBHOOK_SECRET";
 const RUN_COMMAND = /^\/run(?:@(\w+))?(?:\s+([\w-]+))?(?:\s+([\s\S]*))?$/i;
 /** Ticks an unanswered `/run` is retried before the human is told to check (5 s ticks: ~5 min). */
 const RUN_RETRY_TICKS = 60;
+/** Pending `/run`s retried per pass (least-tried first), so an Arete outage bounds the work. */
+const RUN_RETRY_BATCH = 5;
 
 /** How many open requests the "which one?" answer names. */
 const OPEN_GATES_SHOWN = 10;
@@ -499,22 +501,26 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   }
   /** Retry every unclear `/run` (each tick, before new updates); give up loudly after RUN_RETRY_TICKS. */
   async function retryPendingRuns(): Promise<void> {
-    const pending = loadPending();
-    if (!pending.length) return;
-    const left: PendingRun[] = [];
-    for (const r of pending) {
-      if ((await postRun(r)) === "done") continue;
-      if (++r.tries < RUN_RETRY_TICKS) {
-        left.push(r);
+    const batch = [...loadPending()].sort((a, b) => a.tries - b.tries).slice(0, RUN_RETRY_BATCH);
+    if (!batch.length) return;
+    const finished = new Set<string>();
+    const tried = new Map<string, number>();
+    for (const r of batch) {
+      if ((await postRun(r)) === "done") {
+        finished.add(r.runId);
         continue;
       }
-      // given up only once the human has been told (else it stays and is told next tick)
+      const tries = r.tries + 1;
+      tried.set(r.runId, tries);
+      if (tries < RUN_RETRY_TICKS) continue;
+      // given up only once the human has been told (else it stays and is told next pass)
       const told = await api
         .sendMessage(r.chatId, `No clear answer from Arete for ${r.flow} (run ${r.runId}). Check Studio for that run before sending /run again.`, { replyTo: r.messageId })
         .then(() => true, () => false);
-      if (!told) left.push(r);
+      if (told) finished.add(r.runId);
     }
-    savePending(left);
+    // re-read at save time (no await between): a /run added while this pass waited is kept
+    savePending(loadPending().filter((x) => !finished.has(x.runId)).map((x) => (tried.has(x.runId) ? { ...x, tries: tried.get(x.runId)! } : x)));
   }
 
   /**
@@ -599,15 +605,22 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
 
   let timer: ReturnType<typeof setInterval> | undefined;
   let busy = false;
+  let retrying = false;
   let lastError: string | null = null;
   const tick = async () => {
     if (busy) return; // one poller per daemon; a second daemon gets Telegram's 409, surfaced below
     busy = true;
     try {
-      await retryPendingRuns();
       await pollOnce();
       await router.retryDeadLetters();
       await sweepOnce();
+      // off the critical path: an Arete outage never holds up approvals or notifications
+      if (!retrying) {
+        retrying = true;
+        void retryPendingRuns()
+          .catch((e: Error) => log(`telegram /run retry pass failed: ${e.message}`))
+          .finally(() => (retrying = false));
+      }
       lastError = null;
     } catch (e) {
       lastError = (e as Error).message;

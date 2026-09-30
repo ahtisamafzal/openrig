@@ -119,6 +119,26 @@ describe("telegram gateway service", () => {
     expect(JSON.parse(readFileSync(join(home, "state", "telegram-run-pending.json"), "utf8"))).toEqual([]);
   });
 
+  it("/run retries never hold up Telegram: an Arete outage leaves polling and notifications prompt", async () => {
+    const { writeFileSync: write, mkdirSync } = await import("node:fs");
+    const { api, sent } = fakeApi();
+    let posts = 0;
+    const fetchImpl = () => (posts++, new Promise<Response>(() => {})); // Arete never answers
+    mkdirSync(join(home, "state"), { recursive: true });
+    const stuck = Array.from({ length: 12 }, (_, i) => ({ flow: "design-check", runId: `telegram-${900 + i}`, body: "{}", chatId: -1001, messageId: 1, tries: i }));
+    write(join(home, "state", "telegram-run-pending.json"), JSON.stringify(stuck));
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => registry as never, intervalMs: 60_000 });
+    const gate = await repo.create(gateRequest);
+    svc.startServices();
+    try {
+      await vi.waitFor(() => expect(sent.some((m) => m.text.includes("approve / revise"))).toBe(true), { timeout: 2000 });
+      expect(gate.qitemId).toBeTruthy();
+      expect(posts).toBe(1); // one retry in flight at a time, started after the tick's real work
+    } finally {
+      svc.stop();
+    }
+  });
+
   it("/run@otherbot is not ours (handled as an ordinary message); /run@AreteBot is", async () => {
     const { api, reply } = fakeApi();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true, runId: "r" }), { status: 202 }));
