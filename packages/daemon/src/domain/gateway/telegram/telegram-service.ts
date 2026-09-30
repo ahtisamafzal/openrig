@@ -301,12 +301,25 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       try {
         let root: number | undefined;
         putRef(refToken(item.qitemId), item.qitemId); // durable BEFORE the send
-        for (const part of renderParts(item)) {
-          const { messageId } = await api.sendMessage(postChat!, part, root ? { replyTo: root } : {});
+        // Each part is recorded durably (with its message id) the moment Telegram accepts it, so a
+        // failure or crash between parts resumes at the first UNSENT part — the parts already sent
+        // are never sent again. (A crash in the instant between a send and its record can still
+        // repeat that one part: Telegram offers no idempotent send.)
+        const partSent = (i: number) => [...seen].find((id) => id.startsWith(`${key}#part${i}@`));
+        const parts = renderParts(item);
+        for (let i = 0; i < parts.length; i++) {
+          const done = partSent(i);
+          if (done) {
+            root ??= Number(done.slice(done.lastIndexOf("@") + 1));
+            continue;
+          }
+          const { messageId } = await api.sendMessage(postChat!, parts[i]!, root ? { replyTo: root } : {});
+          delivered.markDurable(`${key}#part${i}@${messageId}`, "part-sent");
+          seen.add(`${key}#part${i}@${messageId}`);
           root ??= messageId;
           messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);
         }
-        delivered.markDurable(`${key}#sent`, "sent"); // fsynced BEFORE the receipt: a crash never causes a re-send
+        delivered.markDurable(`${key}#sent`, "sent"); // fsynced BEFORE the receipt: the whole message is never re-sent
         recordPosted(item, key, root!);
         delivered.mark(key, "delivered");
         sent.push(item.qitemId);

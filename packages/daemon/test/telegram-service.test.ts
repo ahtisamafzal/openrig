@@ -149,6 +149,29 @@ describe("telegram gateway service", () => {
     expect(sent.at(-1)!.text.split("\n").filter((l) => /^\d+\. /.test(l))).toHaveLength(10);
   });
 
+  it("a multipart delivery that fails after part 1 resumes at part 2 — part 1 is never sent twice", async () => {
+    const { api, sent } = fakeApi();
+    const { svc } = build(api);
+    const gate = await repo.create({ ...gateRequest, body: "x".repeat(9000) });
+    const realSend = api.sendMessage.bind(api);
+    let calls = 0;
+    api.sendMessage = async (chatId, text, o) => {
+      if (++calls === 2) throw new Error("telegram 502");
+      return realSend(chatId, text, o);
+    };
+    expect((await svc.sweepOnce()).failed).toEqual([gate.qitemId]);
+    expect(sent).toHaveLength(1); // part 1 went out, part 2 failed
+    const rootId = 100;
+    await svc.sweepOnce();
+    const parts = sent.length;
+    expect(parts).toBeGreaterThanOrEqual(3); // 9000 chars -> at least 3 parts in total
+    expect(sent.filter((m) => m.text === sent[0]!.text)).toHaveLength(1); // part 1 exactly once
+    expect(sent.slice(1).every((m) => m.replyTo === rootId)).toBe(true); // resumed parts thread under part 1
+    expect(repo.transitionLog.listForQitem(gate.qitemId).filter((t) => (t.transitionNote ?? "").startsWith("slack-owner-notification-posted "))).toHaveLength(1);
+    await svc.sweepOnce();
+    expect(sent).toHaveLength(parts); // nothing re-sent afterwards
+  });
+
   it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
     const { api } = fakeApi();
     const { svc } = build(api);
@@ -156,14 +179,14 @@ describe("telegram gateway service", () => {
     const order: string[] = [];
     const { SeenStore } = await import("../src/domain/gateway/slack/state-store.js");
     const durable = vi.spyOn(SeenStore.prototype, "markDurable").mockImplementation(function (this: InstanceType<typeof SeenStore>, id: string, status: string) {
-      order.push(`durable:${id.endsWith("#sent") ? "#sent" : id}`);
+      order.push(id.endsWith("#sent") ? "durable:#sent" : id.includes("#part") ? "durable:part" : `durable:${id}`);
       this.mark(id, status);
     });
     const realUpdate = repo.update.bind(repo);
     vi.spyOn(repo, "update").mockImplementation((u) => (order.push("receipt"), realUpdate(u)));
     await svc.sweepOnce();
     durable.mockRestore();
-    expect(order.slice(0, 2)).toEqual(["durable:#sent", "receipt"]);
+    expect(order).toEqual(["durable:part", "durable:#sent", "receipt"]); // each part, then #sent, then the receipt
     expect(gate.qitemId).toBeTruthy();
   });
 
