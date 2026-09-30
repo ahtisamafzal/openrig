@@ -26,26 +26,18 @@ export function getDaemonId(
   // caller completes a pending commit; a failed barrier leaves the marker absent, so the next call
   // retries it. The identity itself is never removed or replaced once linked.
   const committed = `${file}.committed`;
-  if (fs.existsSync(committed)) return read();
-  fs.mkdirSync(home, { recursive: true });
-  if (!fs.existsSync(file)) {
-    // written + fsynced to a temp file, then hard-linked into place (exclusive: racing starts agree)
-    const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    const fd = fs.openSync(tmp, "wx");
-    try {
-      fs.writeSync(fd, `openrig-${randomUUID()}`);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
+  if (fs.existsSync(committed)) {
+    // the marker carries the identity (written + fsynced): if a crash kept the marker but lost the
+    // earlier daemon-id entry (Windows cannot fsync the directory), the identity is restored from it
+    if (!fs.existsSync(file)) {
+      const kept = fs.readFileSync(committed, "utf8").trim();
+      if (!DAEMON_ID.test(kept)) throw new Error(`${committed} is corrupt and ${file} is missing; restore it deliberately`);
+      publishDurably(file, kept);
     }
-    try {
-      fs.linkSync(tmp, file);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    } finally {
-      fs.rmSync(tmp, { force: true });
-    }
+    return read();
   }
+  fs.mkdirSync(home, { recursive: true });
+  if (!fs.existsSync(file)) publishDurably(file, `openrig-${randomUUID()}`);
   const id = read();
   const fsyncDir =
     opts.fsyncDir ??
@@ -64,13 +56,30 @@ export function getDaemonId(
     // directory fsync means the name may not survive a crash: not committed, not reported
     if ((opts.platform ?? process.platform) !== "win32") throw err;
   }
-  // the marker only records that the barrier passed (lost in a crash = the barrier simply reruns)
+  // the marker records that the barrier passed and carries the identity, published the same durable
+  // way (lost in a crash = the barrier simply reruns; kept without daemon-id = restored from it)
+  publishDurably(committed, id);
+  return id;
+}
+
+/** Publish `data` at `file` complete and exclusively: written + fsynced to a unique temp file, then
+ *  hard-linked into place (EEXIST = another caller published first: theirs stands). */
+function publishDurably(file: string, data: string): void {
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = fs.openSync(tmp, "wx");
   try {
-    fs.writeFileSync(committed, id, { flag: "wx" });
+    fs.writeSync(fd, data);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  try {
+    fs.linkSync(tmp, file);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  } finally {
+    fs.rmSync(tmp, { force: true });
   }
-  return id;
 }
 
 // GET /api/info — daemon-info surface for tactical CLI awareness paths
