@@ -134,12 +134,16 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   // the platform supports directory handles (POSIX), so is its directory entry. On Windows there is
   // no directory fsync (documented limitation: NTFS journals the metadata of the create itself).
   if (!fs.existsSync(refsFile)) {
+    const newState = !fs.existsSync(state);
     fs.mkdirSync(state, { recursive: true });
     const fd = fs.openSync(refsFile, "a");
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     if (process.platform !== "win32") {
-      const dfd = fs.openSync(state, "r");
-      try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+      // the journal's entry in `state`, and — when `state` itself is new — its entry in `home`
+      for (const dir of newState ? [state, opts.home] : [state]) {
+        const dfd = fs.openSync(dir, "r");
+        try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+      }
     }
   }
   // DURABLE before the send: the record is flushed to stable storage (fsync); a failure throws, so
