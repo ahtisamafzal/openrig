@@ -130,6 +130,18 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const delivered = new SeenStore(path.join(state, "telegram-delivered.jsonl"));
   const messages = new MessageMap(path.join(state, "telegram-message-map.jsonl"));
   const refsFile = path.join(state, "telegram-refs.jsonl");
+  // the journal is CREATED here, at build — never by the first send: the file is fsynced and, where
+  // the platform supports directory handles (POSIX), so is its directory entry. On Windows there is
+  // no directory fsync (documented limitation: NTFS journals the metadata of the create itself).
+  if (!fs.existsSync(refsFile)) {
+    fs.mkdirSync(state, { recursive: true });
+    const fd = fs.openSync(refsFile, "a");
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (process.platform !== "win32") {
+      const dfd = fs.openSync(state, "r");
+      try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }
+    }
+  }
   // DURABLE before the send: the record is flushed to stable storage (fsync); a failure throws, so
   // the notification is withheld and retried by the next sweep rather than sent uncorrelatable.
   // ponytail: the parent directory entry is not fsynced (Windows has no directory fsync); the

@@ -49,6 +49,14 @@ describe("telegram gateway service", () => {
     svc: buildTelegramService({ home, queueRepo: repo, env, api, loadRegistry: () => registry as never, resolveHumanReply: makeHumanReplyResolver(repo, { act }) }),
   });
 
+  it("the refs journal exists (created durably at build) before any notification is sent", async () => {
+    const { existsSync } = await import("node:fs");
+    const { api, sent } = fakeApi();
+    build(api);
+    expect(existsSync(join(home, "state", "telegram-refs.jsonl"))).toBe(true);
+    expect(sent).toHaveLength(0);
+  });
+
   it("is inert without a token or chat (named, never pretend-active)", () => {
     const svc = buildTelegramService({ home, queueRepo: repo, env: {}, api: fakeApi().api });
     expect(svc.ready).toBe(false);
