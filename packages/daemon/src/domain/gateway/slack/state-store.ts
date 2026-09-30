@@ -49,93 +49,73 @@ const pidAlive = (pid: number) => {
 };
 
 /**
- * A short, synchronous cross-process lock: `<p>.lock` created exclusively, recording an owner
- * token + pid + host. It is never stolen from a LIVE holder (however long it pauses): only a
- * holder verified dead (same host, pid gone) — or a lock left torn/empty by a crash — is removed,
- * and only through recoverDeadLock (compare-and-remove under a recovery lock), so a contender acting
- * on a stale observation can never remove a replacement lock another contender just acquired.
- * Release unlinks only the caller's own token.
- * A contender that cannot get it in `waitMs` gets LockTimeout (callers fall back, never lose data).
+ * A short, synchronous cross-process lock built from GENERATIONS, so no lock file is ever removed
+ * while it could matter: acquiring means exclusively creating `<p>.lock.<N+1>` (owner token + pid +
+ * host) when generation N is free — released (a `.free` marker its owner wrote), its owner verified
+ * dead (same host, pid gone), or left torn by a crash. Exactly one contender can create N+1, so two
+ * contenders that judged the same holder dead cannot both win, and a LIVE holder (however long it
+ * pauses) is never taken over. Older generations are tidied by the next holder. A contender that
+ * cannot get it in `waitMs` gets LockTimeout (callers fall back, never lose data).
+ * ponytail: a generation left TORN (a crash between its create and its write) counts as free after 2 s.
  */
-/**
- * Remove `lockPath` only if it still holds exactly `observed` (the bytes the caller judged dead).
- * Serialized by `<lock>.recover` (exclusive create): while one contender validates and removes,
- * no other can remove anything, so the check and the removal cannot be split by a replacement.
- * ponytail: a recoverer that crashes inside this few-microsecond section leaves `.recover`, which is
- * cleared after 5 s; a second crash in that window is the remaining ceiling.
- */
-export function recoverDeadLock(lockPath: string, observed: string): boolean {
-  const recover = `${lockPath}.recover`;
-  try {
-    fs.closeSync(fs.openSync(recover, "wx"));
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    try {
-      if (Date.now() - fs.statSync(recover).mtimeMs > 5_000) fs.unlinkSync(recover);
-    } catch {
-      /* released meanwhile */
-    }
-    return false; // someone else is recovering: re-evaluate
-  }
-  try {
-    let current: string;
-    try {
-      current = fs.readFileSync(lockPath, "utf8");
-    } catch {
-      return true; // already gone
-    }
-    if (current !== observed) return false; // replaced by a live acquirer: never touch it
-    fs.unlinkSync(lockPath);
-    return true;
-  } finally {
-    try {
-      fs.unlinkSync(recover);
-    } catch {
-      /* gone */
-    }
-  }
-}
-
-function fileLock(p: string, waitMs = 10_000): () => void {
-  const lockPath = `${p}.lock`;
+export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () => void } = {}): () => void {
+  const dir = path.dirname(p);
+  const prefix = `${path.basename(p)}.lock.`;
   const token = `${process.pid}-${randomUUID()}`;
   const deadline = Date.now() + waitMs;
   const nap = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
+  const gens = () => {
     try {
-      const fd = fs.openSync(lockPath, "wx");
+      return fs.readdirSync(dir).filter((f) => f.startsWith(prefix) && /^\d+$/.test(f.slice(prefix.length))).map((f) => Number(f.slice(prefix.length)));
+    } catch {
+      return [];
+    }
+  };
+  const genFile = (g: number) => path.join(dir, `${prefix}${g}`);
+  for (;;) {
+    const all = gens();
+    const top = all.reduce((a, g) => Math.max(a, g), 0);
+    let free = top === 0 || fs.existsSync(`${genFile(top)}.free`);
+    if (!free) {
       try {
-        fs.writeSync(fd, JSON.stringify({ token, pid: process.pid, host: os.hostname() }));
-      } finally {
-        fs.closeSync(fd);
+        const h = JSON.parse(fs.readFileSync(genFile(top), "utf8")) as { pid?: number; host?: string };
+        free = h.host === os.hostname() && typeof h.pid === "number" && !pidAlive(h.pid);
+      } catch {
+        try {
+          free = Date.now() - fs.statSync(genFile(top)).mtimeMs > 2_000; // torn by a crash
+        } catch {
+          continue; // changed meanwhile: re-evaluate
+        }
+      }
+    }
+    if (free) {
+      hooks.afterJudge?.();
+      const mine = top + 1;
+      try {
+        fs.writeFileSync(genFile(mine), JSON.stringify({ token, pid: process.pid, host: os.hostname() }), { flag: "wx" });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") continue; // another contender won N+1
+        throw err;
+      }
+      for (const g of all) {
+        if (g >= top) continue; // tidy only generations no contender can still be judging
+        for (const f of [genFile(g), `${genFile(g)}.free`]) {
+          try {
+            fs.unlinkSync(f);
+          } catch {
+            /* gone */
+          }
+        }
       }
       return () => {
         try {
-          if ((JSON.parse(fs.readFileSync(lockPath, "utf8")) as { token?: string }).token === token) fs.unlinkSync(lockPath);
+          if ((JSON.parse(fs.readFileSync(genFile(mine), "utf8")) as { token?: string }).token === token) fs.writeFileSync(`${genFile(mine)}.free`, "", { flag: "wx" });
         } catch {
-          /* gone, or no longer ours: nothing to release */
+          /* already released */
         }
       };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    let holder: { pid?: number; host?: string } | null = null;
-    let observed: string | null = null;
-    let age = 0;
-    try {
-      age = Date.now() - fs.statSync(lockPath).mtimeMs;
-      observed = fs.readFileSync(lockPath, "utf8");
-      holder = JSON.parse(observed) as { pid?: number; host?: string };
-    } catch {
-      holder = null; // torn (a crash between create and write) or released meanwhile
-    }
-    if (observed === null) continue; // released meanwhile: try again
-    const dead = holder ? holder.host === os.hostname() && typeof holder.pid === "number" && !pidAlive(holder.pid) : age > 2_000;
-    if (dead) {
-      recoverDeadLock(lockPath, observed); // removes it only if it is still exactly what we judged
-      continue;
-    }
-    if (Date.now() > deadline) throw new LockTimeout(`journal lock ${lockPath} is held by a live process`);
+    if (Date.now() > deadline) throw new LockTimeout(`journal lock ${genFile(top)} is held by a live process`);
     Atomics.wait(nap, 0, 0, 5);
   }
 }

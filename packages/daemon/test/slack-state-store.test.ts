@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SeenStore, DeadLetterStore, nodeStateFs, recoverDeadLock, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import { SeenStore, DeadLetterStore, nodeStateFs, fileLock, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
@@ -138,58 +138,59 @@ describe("Slice-11 DeadLetterStore — inbound never-drop, interruption-safe (it
   });
 });
 
-describe("DeadLetterStore — the cross-process journal lock", () => {
+describe("DeadLetterStore — the cross-process journal lock (generations)", () => {
   const fresh = () => join(mkdtempSync(join(tmpdir(), "dl-lock-")), "dead.jsonl");
   const clk = () => new Date("2026-09-30T00:00:00Z");
+  const holder = (pid: number, token = "t") => JSON.stringify({ token, pid, host: hostname() });
+  const deadPid = () => spawnSync(process.execPath, ["-e", "0"]).pid!; // a pid that has exited
 
-  it("a LIVE holder paused past any age is never stolen from; the append goes to a side file, nothing lost", () => {
+  it("a LIVE holder paused past any age is never taken over; the append goes to a side file, nothing lost", () => {
     const file = fresh();
-    writeFileSync(`${file}.lock`, JSON.stringify({ token: "paused", pid: process.pid, host: hostname() })); // alive
+    writeFileSync(`${file}.lock.1`, holder(process.pid, "paused")); // alive
     const d = new DeadLetterStore<{ ts: string }>(file, nodeStateFs, clk, 50);
     d.append({ ts: "a" }, 1);
     d.append({ ts: "b" }, 1);
-    expect(JSON.parse(readFileSync(`${file}.lock`, "utf8")).token).toBe("paused"); // not stolen
+    expect(existsSync(`${file}.lock.2`)).toBe(false); // never taken over
     expect(d.readAll().map((e) => e.ev.ts).sort()).toEqual(["a", "b"]); // readable from the side files
-    // once the holder releases, a settle folds the side files into the journal and removes them
-    unlinkSync(`${file}.lock`); // the paused holder resumes and releases
+    writeFileSync(`${file}.lock.1.free`, ""); // the paused holder resumes and releases
     d.settle([{ entry: d.readAll().find((e) => e.ev.ts === "a")!, outcome: "done" }]);
     expect(d.readAll().map((e) => e.ev.ts)).toEqual(["b"]);
     expect(readdirSync(join(file, "..")).filter((f) => f.includes(".side-"))).toEqual([]);
   });
 
-  it("a fresh orphan lock of a DEAD process (a crash just now) is recovered at once", () => {
+  it("a fresh orphan of a DEAD process (a crash just now) is taken over at once", () => {
     const file = fresh();
-    const dead = spawnSync(process.execPath, ["-e", "0"]).pid!; // a pid that has exited
-    writeFileSync(`${file}.lock`, JSON.stringify({ token: "crashed", pid: dead, host: hostname() }));
+    writeFileSync(`${file}.lock.1`, holder(deadPid(), "crashed"));
     const d = new DeadLetterStore<{ ts: string }>(file, nodeStateFs, clk, 50);
     d.append({ ts: "x" }, 1);
     expect(readFileSync(file, "utf8")).toContain('"x"'); // in the journal itself, not a side file
-    expect(existsSync(`${file}.lock`)).toBe(false); // released
+    expect(existsSync(`${file}.lock.2.free`)).toBe(true); // generation 2 was taken and released
   });
 
-  it("two contenders judged the same dead lock: the second cannot remove the first's replacement", () => {
+  it("two contenders judged the same dead holder: only one gets the next generation, the other waits", () => {
     const file = fresh();
-    const lock = `${file}.lock`;
-    const deadRaw = JSON.stringify({ token: "crashed", pid: spawnSync(process.execPath, ["-e", "0"]).pid, host: hostname() });
-    writeFileSync(lock, deadRaw);
-    // A and B both observed deadRaw. A recovers it and acquires a fresh lock...
-    expect(recoverDeadLock(lock, deadRaw)).toBe(true);
-    const releaseA = nodeStateFs.lock!(file);
-    const aHolds = readFileSync(lock, "utf8");
-    // ...then B acts on its stale observation: A's live lock must survive
-    expect(recoverDeadLock(lock, deadRaw)).toBe(false);
-    expect(readFileSync(lock, "utf8")).toBe(aHolds);
-    // and while A holds it, B cannot get in (A is alive)
-    expect(() => nodeStateFs.lock!(file, 50)).toThrow(/held by a live process/);
-    releaseA();
-    expect(existsSync(lock)).toBe(false);
+    writeFileSync(`${file}.lock.1`, holder(deadPid(), "crashed"));
+    let releaseA: (() => void) | undefined;
+    // B judges generation 1 dead; before B creates generation 2, A (also judging it dead) wins it
+    expect(() =>
+      fileLock(file, 50, {
+        afterJudge: () => {
+          if (!releaseA) releaseA = fileLock(file);
+        },
+      }),
+    ).toThrow(/held by a live process/);
+    expect(JSON.parse(readFileSync(`${file}.lock.2`, "utf8")).pid).toBe(process.pid); // A's, intact
+    expect(existsSync(`${file}.lock.2.free`)).toBe(false);
+    expect(existsSync(`${file}.lock.3`)).toBe(false); // B never got in
+    releaseA!();
+    expect(existsSync(`${file}.lock.2.free`)).toBe(true);
   });
 
-  it("release removes only the caller's own lock", () => {
+  it("release frees only the caller's own generation", () => {
     const file = fresh();
-    const release = nodeStateFs.lock!(file);
-    writeFileSync(`${file}.lock`, JSON.stringify({ token: "someone-else", pid: process.pid, host: hostname() }));
+    const release = fileLock(file);
+    writeFileSync(`${file}.lock.1`, holder(process.pid, "someone-else")); // (not ours any more)
     release();
-    expect(JSON.parse(readFileSync(`${file}.lock`, "utf8")).token).toBe("someone-else");
+    expect(existsSync(`${file}.lock.1.free`)).toBe(false);
   });
 });
