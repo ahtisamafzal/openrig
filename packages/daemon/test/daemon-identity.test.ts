@@ -28,6 +28,15 @@ describe("daemon identity (Arete per-company isolation)", () => {
     };
     expect(() => getDaemonId(mkdtempSync(join(tmpdir(), "rig-eio-")), { platform: "linux", fsyncDir: eio })).toThrow(/EIO/);
     expect(getDaemonId(mkdtempSync(join(tmpdir(), "rig-win-")), { platform: "win32", fsyncDir: eio })).toMatch(/^openrig-/);
+    // a failed barrier is not skipped on the next call: the unsettled name was withdrawn, so the
+    // retry runs the barrier again (and, once it succeeds, reports a settled identity)
+    const home = mkdtempSync(join(tmpdir(), "rig-retry-"));
+    expect(() => getDaemonId(home, { platform: "linux", fsyncDir: eio })).toThrow(/EIO/);
+    let synced = 0;
+    expect(() => getDaemonId(home, { platform: "linux", fsyncDir: (d) => { synced++; eio(d); } })).toThrow(/EIO/);
+    expect(synced).toBe(1);
+    expect(getDaemonId(home, { platform: "linux", fsyncDir: () => { synced++; } })).toMatch(/^openrig-/);
+    expect(synced).toBe(2);
   });
 
   it("is reported by GET /api/info", async () => {

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { SeenStore, DeadLetterStore, nodeStateFs, fileLock, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import { SeenStore, DeadLetterStore, nodeStateFs, fileLock, processStartMs, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, utimesSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 // In-memory FS fake — models append/write/read + a fixed clock, no real disk.
 function memFs(): StateFsOps & { files: Map<string, string> } {
@@ -207,6 +207,24 @@ describe("DeadLetterStore — the cross-process journal lock (generations)", () 
     const releaseLive = fileLock(live);
     expect(() => fileLock(live, 50)).toThrow(/held by a live process/);
     releaseLive();
+  });
+
+  it("a live EXTERNAL holder is never judged a reused pid, even after a wall-clock correction", () => {
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
+    const now = Date.now;
+    try {
+      const file = fresh();
+      // what the holder records for itself comes from the same OS source the verifier reads
+      const started = processStartMs(child.pid!);
+      expect(started).toBeTypeOf("number");
+      writeFileSync(`${file}.lock.1`, JSON.stringify({ token: "live", pid: child.pid, host: hostname(), started }));
+      Date.now = () => now() + 3_600_000; // the clock jumps an hour
+      expect(() => fileLock(file, 50)).toThrow(/held by a live process/);
+      expect(existsSync(`${file}.lock.2`)).toBe(false);
+    } finally {
+      Date.now = now;
+      child.kill();
+    }
   });
 
   it("release frees only the caller's own generation", () => {

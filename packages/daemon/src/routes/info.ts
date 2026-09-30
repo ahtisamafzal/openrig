@@ -34,8 +34,10 @@ export function getDaemonId(
   } finally {
     fs.closeSync(fd);
   }
+  let created = false;
   try {
     fs.linkSync(tmp, file);
+    created = true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   } finally {
@@ -56,7 +58,12 @@ export function getDaemonId(
   } catch (err) {
     // Windows cannot fsync a directory (the file itself is durable there); everywhere else a failed
     // directory fsync means the new name may not survive a crash: never report an unsettled identity
-    if ((opts.platform ?? process.platform) !== "win32") throw err;
+    // — and the name THIS call published is withdrawn, so the next call retries the whole barrier
+    // instead of taking the fast path to an identity whose directory entry was never confirmed
+    if ((opts.platform ?? process.platform) !== "win32") {
+      if (created) fs.rmSync(file, { force: true });
+      throw err;
+    }
   }
   return read();
 }
