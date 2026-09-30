@@ -147,7 +147,8 @@ export async function classifyPaneWithJev(
       layaDownUntil = now + COOLDOWN_MS; // Laya not running: stop asking it for a minute
     }
   }
-  if (!verdict && key && now >= downUntil) {
+  if (!verdict && key && now < downUntil) answered = false; // TypeSafe owed an answer: no cache, re-ask later
+  else if (!verdict && key) {
     try {
       verdict = await ask(ENDPOINT, key, "TypeSafe");
       answered = true;

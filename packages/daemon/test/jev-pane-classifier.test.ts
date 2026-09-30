@@ -177,6 +177,18 @@ describe("classifyPaneWithJev: Laya first, TypeSafe second, heuristics last (off
     expect(await classifyPaneWithJev("k", { env: layaOnly, fetch: keyless.f })).toBeNull();
   });
 
+  it("Laya unsure while TypeSafe cools down: not cached, the same screen reaches TypeSafe later", async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    expect(await classifyPaneWithJev("x", { env: both, fetch: recorder(answer(0.5, 0.5), new Error("down")).f, now })).toBeNull();
+    t += 1_000;
+    expect(await classifyPaneWithJev("p", { env: both, fetch: recorder(answer(0.5, 0.5)).f, now })).toBeNull();
+    t += 61_000;
+    const back = recorder(answer(0.5, 0.5), answer(0.9, 0.1));
+    expect(await classifyPaneWithJev("p", { env: both, fetch: back.f, now })).toEqual({ state: "needs_input", confidence: 0.9, source: "TypeSafe" });
+    expect(back.calls.map((c) => c.url)).toEqual([LAYA, TYPESAFE]);
+  });
+
   it("both down: null", async () => {
     expect(await classifyPaneWithJev("a", { env: both, fetch: recorder(new Error("x"), new Error("y")).f })).toBeNull();
   });
