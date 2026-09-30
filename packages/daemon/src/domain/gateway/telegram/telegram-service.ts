@@ -242,8 +242,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
         `notification_key=${key}`,
         `level=${item.ownerNotificationLevel ?? "RECORD"}`,
         `kind=${item.ownerNotificationKind ?? "unclassified"}`,
-        `message_ts=${messageId}`,
-        `thread_ts=${messageId}`,
+        ...(messageId ? [`message_ts=${messageId}`, `thread_ts=${messageId}`] : ["message_ts=unknown"]),
         "platform=telegram",
       ].join(" "),
     });
@@ -252,7 +251,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   /** The open approval gates `sender` (a Telegram user id) is the human for. */
   function openGatesOf(sender: string): Array<{ qitemId: string; seat: string; summary: string }> {
     const out: Array<{ qitemId: string; seat: string; summary: string }> = [];
-    for (const q of opts.queueRepo.list({ tag: ARETE_GATE_TAG, state: ["pending", "in-progress", "blocked"], limit: 500 })) {
+    for (const q of opts.queueRepo.list({ tag: ARETE_GATE_TAG, state: ["pending", "in-progress", "blocked"], limit: Number.MAX_SAFE_INTEGER })) {
       const hit = ownedBy(q.qitemId, sender);
       if (hit) out.push({ ...hit, summary: q.summary ?? q.qitemId });
     }
@@ -269,6 +268,17 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       const key = item.notificationKey ?? item.qitemId;
       const human = humanOf(item, reg.entities);
       if (seen.has(key) || !human?.connectorBindings.some((b) => b.kind === "telegram")) continue;
+      if (seen.has(`${key}#sent`) || opts.queueRepo.transitionLog.hasOwnerNotificationReceipt(item.qitemId, key)) {
+        // already delivered by an earlier sweep that stopped before its bookkeeping: heal, never re-send
+        try {
+          recordPosted(item, key, 0);
+          delivered.mark(key, "delivered");
+        } catch (e) {
+          failed.push(item.qitemId);
+          log(`telegram receipt for ${item.qitemId} not recorded: ${(e as Error).message} — retried next sweep`);
+        }
+        continue;
+      }
       // ponytail: Telegram posts the immediate outcomes only; log/digest/deferred stay with the
       // Slack path's digest flush + deferral jobs (Slack-only today). Add a Telegram arm when needed.
       const d = decideDelivery({
@@ -287,8 +297,9 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
           root ??= messageId;
           messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);
         }
-        delivered.mark(key, "delivered");
+        delivered.mark(`${key}#sent`, "sent"); // durable: a later failure never causes a re-send
         recordPosted(item, key, root!);
+        delivered.mark(key, "delivered");
         sent.push(item.qitemId);
       } catch (e) {
         failed.push(item.qitemId);

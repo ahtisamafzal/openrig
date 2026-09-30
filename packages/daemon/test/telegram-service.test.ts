@@ -97,6 +97,42 @@ describe("telegram gateway service", () => {
     expect(repo.transitionLog.listForQitem(gate.qitemId).filter((t) => (t.transitionNote ?? "").startsWith("slack-owner-notification-posted "))).toHaveLength(1);
   });
 
+  it("a receipt that fails to record after the send is healed next sweep — recorded, never re-sent", async () => {
+    const { api, sent } = fakeApi();
+    const { svc } = build(api);
+    const gate = await repo.create(gateRequest);
+    const realUpdate = repo.update.bind(repo);
+    const spy = vi.spyOn(repo, "update").mockImplementationOnce(() => {
+      throw new Error("database busy");
+    });
+    expect((await svc.sweepOnce()).failed).toEqual([gate.qitemId]);
+    expect(sent).toHaveLength(1); // it WAS delivered
+    spy.mockImplementation(realUpdate);
+    const receipts = () => repo.transitionLog.listForQitem(gate.qitemId).filter((t) => (t.transitionNote ?? "").startsWith("slack-owner-notification-posted "));
+    expect(receipts()).toHaveLength(0);
+    await svc.sweepOnce();
+    expect(sent).toHaveLength(1); // healed without a second message
+    expect(receipts()).toHaveLength(1);
+    expect(repo.findUndelivered().map((q) => q.qitemId)).not.toContain(gate.qitemId);
+    await svc.sweepOnce();
+    expect(sent).toHaveLength(1);
+    expect(receipts()).toHaveLength(1);
+  });
+
+  it("the open-gate count is never truncated: two of the human's gates behind 500 others are still 'several'", async () => {
+    const { api, sent, reply } = fakeApi();
+    const { svc, act } = build(api);
+    // the founder's OLD gate sits behind 501 newer ones (the list is newest-first), the second is new
+    const old = await repo.create({ ...gateRequest, summary: "Founder gate A" });
+    db.prepare("UPDATE queue_items SET ts_created = ? WHERE qitem_id = ?").run(new Date(Date.now() - 86_400_000).toISOString(), old.qitemId);
+    for (let i = 0; i < 501; i++) await repo.create({ sourceSession: "author@rig", destinationSession: "worker@rig", summary: `agent gate ${i}`, body: "x", tags: ["arete-gate"], nudge: false });
+    await repo.create({ ...gateRequest, summary: "Founder gate B" });
+    reply(1, "approve");
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    expect(sent.at(-1)!.text).toContain("You have 2 open requests");
+  });
+
   it("a plain decision (no Reply) resolves the human's ONLY open gate; with several open nothing is guessed", async () => {
     const { api, sent, reply } = fakeApi();
     const { svc, act } = build(api);
