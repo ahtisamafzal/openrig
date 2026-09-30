@@ -843,7 +843,8 @@ export class HerdrSeatAdapter extends TmuxAdapter {
 
   // ---- not available on herdr -----------------------------------------------
 
-  // ponytail: no transcript capture yet; poll `pane read` into the transcript file if `rig transcript` is needed.
+  // pipe-pane is unused: transcripts come from transcript-rotation.ts, which captures the trailing
+  // lines through capturePaneContent (`herdr pane read`) on a timer — bounded, as herdr scrollback is.
   override async startPipePane(): Promise<TmuxResult> {
     return { ok: true };
   }
