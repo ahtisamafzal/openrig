@@ -250,6 +250,34 @@ describe("telegram gateway service", () => {
     expect((await win.sweepOnce()).sent).toEqual([gate.qitemId]);
   });
 
+  it("POSIX barriers: a new plans dir's parent AND the dir are fsynced before part 1; temp removal is fsynced", async () => {
+    const { api, sent } = fakeApi();
+    const events: string[] = [];
+    const realSend = api.sendMessage.bind(api);
+    api.sendMessage = async (c, t, o) => (events.push("send"), realSend(c, t, o));
+    const fsyncDir = (d: string) => void events.push(`fsync:${d.endsWith("telegram-plans") ? "plans" : d.endsWith("state") ? "state" : d}`);
+    const svc = buildTelegramService({ home, queueRepo: repo, env, api, loadRegistry: () => registry as never, platform: "linux", fsyncDir });
+    await repo.create(gateRequest);
+    await svc.sweepOnce();
+    expect(events.slice(0, 3)).toEqual(["fsync:state", "fsync:plans", "send"]);
+    expect(sent).toHaveLength(1);
+    // a stale temp removal is followed by a plans-dir barrier
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(home, "state", "telegram-plans", "x.json.tmp-1"), "SECRET");
+    events.length = 0;
+    await svc.sweepOnce();
+    expect(events[0]).toBe("fsync:plans");
+    // and a failing parent barrier on a brand-new dir sends nothing
+    const home2 = mkdtempSync(join(tmpdir(), "telegram-gw2-"));
+    const { api: api2, sent: sent2 } = fakeApi();
+    const bad = buildTelegramService({ home: home2, queueRepo: repo, env, api: api2, loadRegistry: () => registry as never, platform: "linux",
+      fsyncDir: (d) => { if (d.endsWith("state")) throw Object.assign(new Error("EIO"), { code: "EIO" }); } });
+    await repo.create({ ...gateRequest, summary: "second" });
+    await bad.sweepOnce();
+    expect(sent2).toHaveLength(0);
+    rmSync(home2, { recursive: true, force: true });
+  });
+
   it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
     const { api } = fakeApi();
     const { svc } = build(api);

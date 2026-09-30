@@ -290,8 +290,19 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const plansDir = path.join(state, "telegram-plans");
   type Plan = { key: string; qitemId: string; seat: string; parts: string[] };
   const planFile = (key: string) => path.join(plansDir, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.json`);
+  /** Directory fsync as a barrier: a failure throws, except on Windows (no directory handle). */
+  const dirBarrier = (dir: string) => {
+    try {
+      (opts.fsyncDir ?? fsyncDirectory)(dir);
+    } catch (err) {
+      if ((opts.platform ?? process.platform) !== "win32") throw err;
+    }
+  };
   function savePlan(plan: Plan): void {
-    fs.mkdirSync(plansDir, { recursive: true });
+    if (!fs.existsSync(plansDir)) {
+      fs.mkdirSync(plansDir, { recursive: true });
+      dirBarrier(state); // the new directory's own entry, durable before anything is sent
+    }
     const file = planFile(plan.key);
     const tmp = `${file}.tmp-${process.pid}`;
     const fd = fs.openSync(tmp, "w");
@@ -304,11 +315,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     fs.renameSync(tmp, file);
     // the new NAME is durable before part 1 goes out: a power loss must not lose the plan of a
     // message the human is already reading (Windows has no directory fsync — NTFS journals the rename)
-    try {
-      (opts.fsyncDir ?? fsyncDirectory)(plansDir);
-    } catch (err) {
-      if ((opts.platform ?? process.platform) !== "win32") throw err;
-    }
+    dirBarrier(plansDir);
   }
   /** Temp files a crash left between fsync and rename hold message text: removed every sweep. */
   function dropStaleTemps(): void {
@@ -318,9 +325,18 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     } catch {
       return;
     }
-    for (const f of files) if (f.includes(".json.tmp-")) fs.rmSync(path.join(plansDir, f), { force: true });
+    let removed = false;
+    for (const f of files) {
+      if (!f.includes(".json.tmp-")) continue;
+      fs.rmSync(path.join(plansDir, f), { force: true });
+      removed = true;
+    }
+    if (removed) dirBarrier(plansDir); // the removal survives a power loss (the text stays gone)
   }
-  const dropPlan = (key: string) => fs.rmSync(planFile(key), { force: true });
+  const dropPlan = (key: string) => {
+    fs.rmSync(planFile(key), { force: true });
+    dirBarrier(plansDir);
+  };
   function loadPlans(): Map<string, Plan> {
     const out = new Map<string, Plan>();
     let files: string[] = [];
