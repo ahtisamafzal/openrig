@@ -94,7 +94,7 @@ describe("classifyPaneWithJev (offline)", () => {
   });
 
   it("reads both answers from one call", async () => {
-    expect(await classifyPaneWithJev("a", { env, fetch: fakeFetch(answer(0.05, 0.1)).f })).toEqual({ state: "idle", confidence: 0.9 });
+    expect(await classifyPaneWithJev("a", { env, fetch: fakeFetch(answer(0.05, 0.1)).f })).toEqual({ state: "idle", confidence: 0.9, source: "TypeSafe" });
   });
 
   it("caches per screen text", async () => {
@@ -112,12 +112,76 @@ describe("classifyPaneWithJev (offline)", () => {
     expect(await classifyPaneWithJev("y", { env, fetch: idle.f, now })).toBeNull();
     expect(idle.calls()).toBe(0);
     t += 61_000;
-    expect(await classifyPaneWithJev("y", { env, fetch: fakeFetch(answer(0.05, 0.9)).f, now })).toEqual({ state: "running", confidence: 0.9 });
+    expect(await classifyPaneWithJev("y", { env, fetch: fakeFetch(answer(0.05, 0.9)).f, now })).toEqual({ state: "running", confidence: 0.9, source: "TypeSafe" });
   });
 });
 
 // Live: real TypeSafe calls with the operator's key (skipped when TYPESAFE_API_KEY is unset).
 // Screens are real captures from the Windows trio smoke (2026-09-28).
+describe("classifyPaneWithJev: Laya first, TypeSafe second, heuristics last (offline)", () => {
+  beforeEach(() => resetJevPaneClassifier());
+  const LAYA = "http://127.0.0.1:8000/v1/systemone";
+  const TYPESAFE = "https://api.typesafe.ai/v1/systemone";
+  const both = { ...env, LAYA_URL: "http://127.0.0.1:8000/" } as NodeJS.ProcessEnv;
+  const layaOnly = { LAYA_URL: "http://127.0.0.1:8000", OPENRIG_JEV_PANE_CLASSIFICATION: "1" } as NodeJS.ProcessEnv;
+  function recorder(...responses: Array<Response | Error>) {
+    const calls: Array<{ url: string; auth?: string }> = [];
+    const f = (async (url: string, init: RequestInit) => {
+      calls.push({ url, auth: (init.headers as Record<string, string>).Authorization });
+      const next = responses.shift();
+      if (!next) throw new Error("unexpected call");
+      if (next instanceof Error) throw next;
+      return next;
+    }) as unknown as typeof fetch;
+    return { f, calls };
+  }
+
+  it("Laya alone enables it (still behind the pane opt-in); no key goes to Laya", async () => {
+    expect(jevPaneEnabled(layaOnly)).toBe(true);
+    expect(jevPaneEnabled({ LAYA_URL: "http://127.0.0.1:8000" })).toBe(false);
+    const r = recorder(answer(0.9, 0.1));
+    expect(await classifyPaneWithJev("a", { env: both, fetch: r.f })).toEqual({ state: "needs_input", confidence: 0.9, source: "Laya" });
+    expect(r.calls).toEqual([{ url: LAYA, auth: undefined }]);
+  });
+
+  it("Laya down: TypeSafe answers, and Laya is skipped for 60s", async () => {
+    let t = 1_000_000;
+    const now = () => t;
+    const r = recorder(new Error("ECONNREFUSED"), answer(0.05, 0.9));
+    expect(await classifyPaneWithJev("a", { env: both, fetch: r.f, now })).toEqual({ state: "running", confidence: 0.9, source: "TypeSafe" });
+    expect(r.calls.map((c) => c.url)).toEqual([LAYA, TYPESAFE]);
+    const again = recorder(answer(0.9, 0.1));
+    await classifyPaneWithJev("b", { env: both, fetch: again.f, now });
+    expect(again.calls.map((c) => c.url)).toEqual([TYPESAFE]);
+    t += 61_000;
+    const back = recorder(answer(0.9, 0.1));
+    expect((await classifyPaneWithJev("c", { env: both, fetch: back.f, now }))?.source).toBe("Laya");
+  });
+
+  it("Laya unsure (no verdict): TypeSafe decides", async () => {
+    const r = recorder(answer(0.5, 0.5), answer(0.05, 0.1));
+    expect(await classifyPaneWithJev("a", { env: both, fetch: r.f })).toEqual({ state: "idle", confidence: 0.9, source: "TypeSafe" });
+    expect(r.calls.map((c) => c.url)).toEqual([LAYA, TYPESAFE]);
+    // a Laya verdict under 0.7 is unsure too (TypeSafe alone would act on an open prompt at 0.6)
+    const weak = recorder(answer(0.67, 0.2), answer(0.05, 0.95));
+    expect(await classifyPaneWithJev("b", { env: both, fetch: weak.f })).toEqual({ state: "running", confidence: 0.95, source: "TypeSafe" });
+  });
+
+  it("Laya unsure and TypeSafe down or keyless: null, heuristics stand; a failure is not cached", async () => {
+    const r = recorder(answer(0.5, 0.5), new Error("down"));
+    expect(await classifyPaneWithJev("a", { env: both, fetch: r.f })).toBeNull();
+    resetJevPaneClassifier();
+    const retry = recorder(answer(0.5, 0.5), answer(0.9, 0.1));
+    expect((await classifyPaneWithJev("a", { env: both, fetch: retry.f }))?.source).toBe("TypeSafe");
+    const keyless = recorder(answer(0.5, 0.5));
+    expect(await classifyPaneWithJev("k", { env: layaOnly, fetch: keyless.f })).toBeNull();
+  });
+
+  it("both down: null", async () => {
+    expect(await classifyPaneWithJev("a", { env: both, fetch: recorder(new Error("x"), new Error("y")).f })).toBeNull();
+  });
+});
+
 describe.skipIf(!process.env.TYPESAFE_API_KEY?.trim())("classifyPaneWithJev (live TypeSafe)", () => {
   beforeEach(() => {
     resetJevPaneClassifier();

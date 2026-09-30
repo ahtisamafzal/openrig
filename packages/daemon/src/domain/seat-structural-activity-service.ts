@@ -89,7 +89,7 @@ export class SeatStructuralActivityService {
       // Structure found no signal (herdr's Windows panes): ask Jev. Only fail-safe verdicts
       // (running / needs_input) count — this cache feeds idle-gated automation too.
       const jev = await classifyPaneWithJev(content);
-      if (jev && jev.state !== "idle") c = { state: JEV_TO_PANE[jev.state], reason: `jev_${jev.state}`, evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}` };
+      if (jev && jev.state !== "idle") c = { state: JEV_TO_PANE[jev.state], reason: `jev_${jev.state}`, evidence: `${jev.source} ${jev.confidence.toFixed(2)}` };
     }
     const obs: StructuralObservation = {
       state: c.state,

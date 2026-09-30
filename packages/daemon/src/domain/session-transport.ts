@@ -306,7 +306,7 @@ export async function probeSessionActivity(input: {
         return {
           state: jev.state,
           reason: `jev_${jev.state}`,
-          evidence: `TypeSafe Jev ${jev.confidence.toFixed(2)}; ${classification.reason}`,
+          evidence: `${jev.source} ${jev.confidence.toFixed(2)}; ${classification.reason}`,
           evidenceSource: "pane_heuristic",
           sampledAt,
           fallback: true,
