@@ -72,7 +72,7 @@
     "build": "tsc && node scripts/copy-workflow-specs.mjs",
     "gen:control-plane-json": "node scripts/gen-control-plane-json.mjs",
     "test": "vitest run",
-    "test:windows": "vitest run test/telegram-service.test.ts test/telegram-protocol.test.ts test/gate-decision.test.ts test/secret-acl-windows.test.ts test/slack-config.test.ts test/complete-human-notifications.test.ts test/slack-inbound-gate.test.ts test/owner-notification-routing.test.ts test/slack-subsystem-cutover.test.ts test/delivery-rules-engine.test.ts test/human-channel-contract.test.ts test/notification-adapters.test.ts test/notification-dispatcher.test.ts test/gateway-human-registry.test.ts test/settings-browser.test.ts",
+    "test:windows": "vitest run test/telegram-service.test.ts test/telegram-protocol.test.ts test/gate-decision.test.ts test/secret-acl-windows.test.ts test/slack-config.test.ts test/complete-human-notifications.test.ts test/slack-inbound-gate.test.ts test/owner-notification-routing.test.ts test/slack-subsystem-cutover.test.ts test/delivery-rules-engine.test.ts test/human-channel-contract.test.ts test/notification-adapters.test.ts test/notification-dispatcher.test.ts test/gateway-human-registry.test.ts test/settings-browser.test.ts test/daemon-identity.test.ts test/slack-state-store.test.ts",
     "eval": "node --import tsx scripts/run-evals.mjs",
     "test:watch": "vitest",
     "dev": "tsx watch src/index.ts"
