@@ -216,6 +216,11 @@ describe("telegram gateway service", () => {
     const total = sent.length;
     await svc.sweepOnce();
     expect(sent).toHaveLength(total); // finished once, never again
+    // and the finished message's text is no longer kept anywhere in the gateway state
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
+    const stateText = walk(join(home, "state")).map((f) => readFileSync(f, "utf8")).join("\n");
+    expect(stateText).not.toContain("x".repeat(200));
   });
 
   it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
@@ -232,7 +237,7 @@ describe("telegram gateway service", () => {
     vi.spyOn(repo, "update").mockImplementation((u) => (order.push("receipt"), realUpdate(u)));
     await svc.sweepOnce();
     durable.mockRestore();
-    expect(order).toEqual(["durable:plan", "durable:part", "durable:#sent", "receipt"]); // the plan, each part, #sent, then the receipt
+    expect(order).toEqual(["durable:part", "durable:#sent", "receipt"]); // each part, #sent, then the receipt
     expect(gate.qitemId).toBeTruthy();
   });
 

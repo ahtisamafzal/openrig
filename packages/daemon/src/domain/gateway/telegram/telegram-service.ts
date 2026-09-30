@@ -273,18 +273,39 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
    * alert list, episode or policy — so nothing that changes afterwards (a newer notification, a
    * stricter dial, the item closing) can strand the rest of a message the human already sees.
    */
-  const plans = new SeenStore(path.join(state, "telegram-plans.jsonl"));
+  // One file per ACTIVE plan (never an archive): written atomically (temp + fsync + rename) before
+  // part 1, deleted once the delivery is complete — delivered message text does not persist here.
+  const plansDir = path.join(state, "telegram-plans");
   type Plan = { key: string; qitemId: string; seat: string; parts: string[] };
-  const planId = (plan: Plan) => `plan:${JSON.stringify(plan)}`;
+  const planFile = (key: string) => path.join(plansDir, `${createHash("sha256").update(key).digest("hex").slice(0, 32)}.json`);
+  function savePlan(plan: Plan): void {
+    fs.mkdirSync(plansDir, { recursive: true });
+    const file = planFile(plan.key);
+    const tmp = `${file}.tmp-${process.pid}`;
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeSync(fd, JSON.stringify(plan));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  }
+  const dropPlan = (key: string) => fs.rmSync(planFile(key), { force: true });
   function loadPlans(): Map<string, Plan> {
     const out = new Map<string, Plan>();
-    for (const id of plans.load()) {
-      if (!id.startsWith("plan:")) continue;
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(plansDir).filter((f) => f.endsWith(".json"));
+    } catch {
+      return out;
+    }
+    for (const f of files) {
       try {
-        const plan = JSON.parse(id.slice(5)) as Plan;
+        const plan = JSON.parse(fs.readFileSync(path.join(plansDir, f), "utf8")) as Plan;
         out.set(plan.key, plan);
       } catch {
-        /* a torn line: ignored (the delivery it named re-plans from scratch) */
+        /* unreadable: ignored (never a partial write — plans are renamed into place complete) */
       }
     }
     return out;
@@ -310,6 +331,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
     delivered.markDurable(`${plan.key}#sent`, "sent"); // fsynced BEFORE the receipt: never re-sent
     if (item) recordPosted(item, plan.key, root ?? 0);
     delivered.mark(plan.key, "delivered");
+    dropPlan(plan.key); // complete: the message text is not kept
   }
 
   async function sweepOnce(): Promise<{ sent: string[]; failed: string[] }> {
@@ -322,7 +344,10 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
 
     // 1. finish every started delivery first, whatever the alert list / episode / policy says now
     for (const plan of started.values()) {
-      if (seen.has(plan.key)) continue;
+      if (seen.has(plan.key)) {
+        dropPlan(plan.key); // delivered before a crash removed it
+        continue;
+      }
       try {
         await finish(plan, seen, opts.queueRepo.getById(plan.qitemId));
         sent.push(plan.qitemId);
@@ -354,7 +379,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       try {
         putRef(refToken(item.qitemId), item.qitemId); // durable BEFORE the send
         const plan: Plan = { key, qitemId: item.qitemId, seat: item.sourceSession ?? cfg.inboundDestination, parts: renderParts(item) };
-        plans.markDurable(planId(plan), "planned"); // the exact message, durable before part 1
+        savePlan(plan); // the exact message, durable before part 1
         await finish(plan, seen, item);
         sent.push(item.qitemId);
       } catch (e) {
