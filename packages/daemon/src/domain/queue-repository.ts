@@ -3171,6 +3171,22 @@ export class QueueRepository {
    * A generic null nudge is still excluded; only a structured OWNER episode
    * makes that absence meaningful. READ only — no retry or unwind.
    */
+  /** Open items carrying `tag` that are addressed to (or parked on) a session whose local part is
+   *  `local` — newest first, at most `limit`. Filtered in SQL: never a scan of the whole queue. */
+  openTaggedFor(local: string, tag: string, limit: number): QueueItem[] {
+    const like = `${local.replace(/[\\%_]/g, (c) => `\\${c}`)}@%`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM queue_items
+          WHERE state IN ('pending', 'in-progress', 'blocked')
+            AND (destination_session LIKE ? ESCAPE '\\' OR blocked_on LIKE ? ESCAPE '\\')
+            AND EXISTS (SELECT 1 FROM json_each(queue_items.tags) WHERE value = ?)
+          ORDER BY ts_created DESC LIMIT ?`,
+      )
+      .all(like, like, tag, limit) as QueueItemRow[];
+    return rows.map((r) => this.rowToItem(r, false));
+  }
+
   findUndelivered(opts?: { rig?: string; limit?: number; compact?: boolean }): QueueItem[] {
     // OPR.0.5.6.14 — delivery truth belongs to the CURRENT human-notification
     // episode, not to the row's whole history. Pull every active row that can

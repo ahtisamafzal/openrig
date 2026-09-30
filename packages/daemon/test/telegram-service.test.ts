@@ -131,6 +131,40 @@ describe("telegram gateway service", () => {
     await svc.pollOnce();
     expect(act).not.toHaveBeenCalled();
     expect(sent.at(-1)!.text).toContain("You have 2 open requests");
+    // the lookup is filtered to the human in SQL and bounded — never a scan of every open gate
+    const scan = vi.spyOn(repo, "list");
+    const found = repo.openTaggedFor("human-founder", "arete-gate", 11);
+    expect(found.map((q) => q.summary)).toEqual(["Founder gate B", "Founder gate A"]);
+    expect(scan).not.toHaveBeenCalled();
+  });
+
+  it("the 'which one?' answer names at most 10 and says 'more than 10' beyond that", async () => {
+    const { api, sent, reply } = fakeApi();
+    const { svc, act } = build(api);
+    for (let i = 0; i < 12; i++) await repo.create({ ...gateRequest, summary: `Gate ${i}` });
+    reply(1, "reject");
+    await svc.pollOnce();
+    expect(act).not.toHaveBeenCalled();
+    expect(sent.at(-1)!.text).toContain("You have more than 10 open requests");
+    expect(sent.at(-1)!.text.split("\n").filter((l) => /^\d+\. /.test(l))).toHaveLength(10);
+  });
+
+  it("a delivery marks '#sent' durably BEFORE the receipt is written", async () => {
+    const { api } = fakeApi();
+    const { svc } = build(api);
+    const gate = await repo.create(gateRequest);
+    const order: string[] = [];
+    const { SeenStore } = await import("../src/domain/gateway/slack/state-store.js");
+    const durable = vi.spyOn(SeenStore.prototype, "markDurable").mockImplementation(function (this: InstanceType<typeof SeenStore>, id: string, status: string) {
+      order.push(`durable:${id.endsWith("#sent") ? "#sent" : id}`);
+      this.mark(id, status);
+    });
+    const realUpdate = repo.update.bind(repo);
+    vi.spyOn(repo, "update").mockImplementation((u) => (order.push("receipt"), realUpdate(u)));
+    await svc.sweepOnce();
+    durable.mockRestore();
+    expect(order.slice(0, 2)).toEqual(["durable:#sent", "receipt"]);
+    expect(gate.qitemId).toBeTruthy();
   });
 
   it("a plain decision (no Reply) resolves the human's ONLY open gate; with several open nothing is guessed", async () => {

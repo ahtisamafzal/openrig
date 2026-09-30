@@ -25,6 +25,8 @@ import path from "node:path";
 export interface StateFsOps {
   readFileSync(p: string): string; // throws (ENOENT) when absent — callers treat as empty
   appendFileSync(p: string, data: string): void;
+  /** Append and fsync before returning (a record that must survive power loss). Absent = appendFileSync. */
+  appendDurable?(p: string, data: string): void;
   writeFileSync(p: string, data: string): void;
   rename(from: string, to: string): void; // atomic same-dir replace
   mkdirp(dir: string): void;
@@ -183,6 +185,15 @@ export function fileLock(p: string, waitMs = 10_000, hooks: { afterJudge?: () =>
 export const nodeStateFs: StateFsOps = {
   readFileSync: (p) => fs.readFileSync(p, "utf8"),
   appendFileSync: (p, d) => fs.appendFileSync(p, d),
+  appendDurable: (p, d) => {
+    const fd = fs.openSync(p, "a");
+    try {
+      fs.writeSync(fd, d);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  },
   writeFileSync: (p, d) => fs.writeFileSync(p, d),
   rename: (from, to) => fs.renameSync(from, to),
   mkdirp: (dir) => {
@@ -242,6 +253,14 @@ export class SeenStore {
   mark(id: string, status: string): void {
     this.fsops.mkdirp(path.dirname(this.file));
     this.fsops.appendFileSync(this.file, JSON.stringify({ id, ts: this.now().toISOString(), status }) + "\n");
+  }
+
+  /** As mark(), but the record is on disk (fsynced) when this returns: for a marker that must
+   *  survive a crash or power loss (e.g. "this message was already sent — never send it again"). */
+  markDurable(id: string, status: string): void {
+    this.fsops.mkdirp(path.dirname(this.file));
+    const line = JSON.stringify({ id, ts: this.now().toISOString(), status }) + "\n";
+    (this.fsops.appendDurable ?? this.fsops.appendFileSync)(this.file, line);
   }
 
   /**

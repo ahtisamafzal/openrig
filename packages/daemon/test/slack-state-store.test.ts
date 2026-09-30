@@ -41,6 +41,22 @@ describe("Slice-11 SeenStore — durable delivery-dedup (item 2)", () => {
     expect(new SeenStore("/s/seen.jsonl", fsx, clock).load().size).toBe(0);
   });
 
+  it("markDurable() appends through the fsynced append (the plain one is never used for it)", () => {
+    const fsx = memFs();
+    const calls: string[] = [];
+    const plain = fsx.appendFileSync;
+    const ops = { ...fsx, appendFileSync: (p: string, d: string) => (calls.push("append"), plain(p, d)), appendDurable: (p: string, d: string) => (calls.push("durable"), plain(p, d)) };
+    const s = new SeenStore("/x/seen.jsonl", ops);
+    s.markDurable("k#sent", "sent");
+    expect(calls).toEqual(["durable"]);
+    expect(s.load().has("k#sent")).toBe(true);
+    // the real node implementation writes and fsyncs a real file
+    const dir = mkdtempSync(join(tmpdir(), "seen-durable-"));
+    const real = new SeenStore(join(dir, "seen.jsonl"), nodeStateFs);
+    real.markDurable("a", "sent");
+    expect(real.load().has("a")).toBe(true);
+  });
+
   it("mark() then load() sees the id; SURVIVES a restart (fresh instance, same fs)", () => {
     const fsx = memFs();
     new SeenStore("/s/seen.jsonl", fsx, clock).mark("qitem-1", "posted");

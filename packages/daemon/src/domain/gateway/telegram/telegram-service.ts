@@ -29,6 +29,9 @@ import { splitMessage, TELEGRAM_LIMIT } from "./split.js";
 export const SECRET_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN";
 export const SECRET_TELEGRAM_CHAT = "TELEGRAM_CHAT_ID";
 
+/** How many open requests the "which one?" answer names. */
+const OPEN_GATES_SHOWN = 10;
+
 type ReplyResolution = "resolved" | "already-resolved" | "not-applicable" | "invalid-decision";
 
 export interface TelegramServiceOpts {
@@ -250,8 +253,14 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
 
   /** The open approval gates `sender` (a Telegram user id) is the human for. */
   function openGatesOf(sender: string): Array<{ qitemId: string; seat: string; summary: string }> {
+    const reg = registry();
+    if (!reg.ok) return [];
+    const human = resolveSlackHandle(sender, reg.entities, "telegram");
+    if (human.kind !== "registered") return [];
+    // the query is filtered to THIS human in SQL (no global scan) and bounded: only zero / one /
+    // several matters, plus up to 10 names for the "which one?" answer
     const out: Array<{ qitemId: string; seat: string; summary: string }> = [];
-    for (const q of opts.queueRepo.list({ tag: ARETE_GATE_TAG, state: ["pending", "in-progress", "blocked"], limit: Number.MAX_SAFE_INTEGER })) {
+    for (const q of opts.queueRepo.openTaggedFor(human.address.split("@")[0]!, ARETE_GATE_TAG, OPEN_GATES_SHOWN + 1)) {
       const hit = ownedBy(q.qitemId, sender);
       if (hit) out.push({ ...hit, summary: q.summary ?? q.qitemId });
     }
@@ -297,7 +306,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
           root ??= messageId;
           messages.put(postChat!, messageId, item.qitemId, item.sourceSession ?? cfg.inboundDestination);
         }
-        delivered.mark(`${key}#sent`, "sent"); // durable: a later failure never causes a re-send
+        delivered.markDurable(`${key}#sent`, "sent"); // fsynced BEFORE the receipt: a crash never causes a re-send
         recordPosted(item, key, root!);
         delivered.mark(key, "delivered");
         sent.push(item.qitemId);
@@ -326,9 +335,10 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
           if (open.length === 1) ref = { qitemId: open[0]!.qitemId, seat: open[0]!.seat };
           else if (open.length > 1) {
             ambiguous = true;
-            const list = open.slice(0, 10).map((g, i) => `${i + 1}. ${g.summary}`).join("\n");
+            const list = open.slice(0, OPEN_GATES_SHOWN).map((g, i) => `${i + 1}. ${g.summary}`).join("\n");
+            const count = open.length > OPEN_GATES_SHOWN ? `more than ${OPEN_GATES_SHOWN}` : String(open.length);
             await api
-              .sendMessage(p.chatId, `You have ${open.length} open requests — nothing was recorded. Reply (swipe left) to the one you mean:\n${list}`, { replyTo: p.messageId })
+              .sendMessage(p.chatId, `You have ${count} open requests — nothing was recorded. Reply (swipe left) to the one you mean:\n${list}`, { replyTo: p.messageId })
               .catch(() => undefined);
           }
         }
