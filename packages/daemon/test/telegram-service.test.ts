@@ -100,6 +100,25 @@ describe("telegram gateway service", () => {
     expect(bodies).toHaveLength(3); // nothing left pending
   });
 
+  it("/run: an answer Telegram fails to deliver is kept pending (flushed to disk) and re-reported", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { api, sent, reply } = fakeApi();
+    const realSend = api.sendMessage;
+    let failSends = 1;
+    api.sendMessage = async (...a) => (failSends-- > 0 ? Promise.reject(new Error("telegram 502")) : realSend(...a));
+    let posts = 0;
+    const fetchImpl = async () => (posts++, new Response(JSON.stringify({ ok: true, runId: "telegram-31", status: posts > 1 ? "exists" : "started" }), { status: 202 }));
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => registry as never });
+    reply(31, "/run design-check x");
+    await svc.pollOnce(); // started, but "Started ..." could not be delivered
+    const pending = JSON.parse(readFileSync(join(home, "state", "telegram-run-pending.json"), "utf8")) as Array<{ runId: string }>;
+    expect(pending.map((p) => p.runId)).toEqual(["telegram-31"]);
+    await svc.retryPendingRuns!(); // Arete: exists (idempotent) -> the human is told now
+    expect(sent.at(-1)!.text).toContain("Started design-check (run telegram-31)");
+    expect(posts).toBe(2);
+    expect(JSON.parse(readFileSync(join(home, "state", "telegram-run-pending.json"), "utf8"))).toEqual([]);
+  });
+
   it("/run@otherbot is not ours (handled as an ordinary message); /run@AreteBot is", async () => {
     const { api, reply } = fakeApi();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true, runId: "r" }), { status: 202 }));

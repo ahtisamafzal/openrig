@@ -452,18 +452,31 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const loadPending = (): PendingRun[] => {
     try { return JSON.parse(fs.readFileSync(pendingFile, "utf8")) as PendingRun[]; } catch { return []; }
   };
+  /** Durable before the offset moves: the temp file is flushed to disk, then renamed into place. */
   const savePending = (runs: PendingRun[]) => {
+    fs.mkdirSync(state, { recursive: true });
     const tmp = `${pendingFile}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(runs));
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeSync(fd, JSON.stringify(runs));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(tmp, pendingFile);
   };
   /**
-   * Post one start. 'done' when Arete answered definitively (started, already started, or a clear
-   * refusal) and the human was told; 'unknown' when it may or may not have started (timeout, lost
-   * response, 5xx, unreadable body) — the same body is retried: its run id makes Arete idempotent.
+   * Post one start. 'done' only when Arete answered definitively (started, already started, or a
+   * clear refusal) AND the human received that answer; otherwise 'unknown' (timeout, lost response,
+   * 5xx, unreadable body, or the answer could not be delivered) — the same body is retried: its run
+   * id makes Arete idempotent, so a retry after a start only re-reports it.
    */
   async function postRun(r: PendingRun): Promise<"done" | "unknown"> {
-    const say = (text: string) => api.sendMessage(r.chatId, text, { replyTo: r.messageId }).catch(() => undefined);
+    const say = (text: string): Promise<"done" | "unknown"> =>
+      api.sendMessage(r.chatId, text, { replyTo: r.messageId }).then(
+        () => "done" as const,
+        (e: Error) => (log(`telegram /run ${r.runId}: outcome not delivered (${e.message}); retried`), "unknown" as const),
+      );
     let res: Response;
     let out: { ok?: boolean; runId?: string; error?: string; status?: string } | null;
     try {
@@ -478,15 +491,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       log(`telegram /run ${r.flow} (${r.runId}): ${(e as Error).message}`);
       return "unknown";
     }
-    if (res.ok && out?.ok) {
-      await say(`Started ${r.flow} (run ${out.runId ?? r.runId}). Any approval it needs will come here.`);
-      return "done";
-    }
+    if (res.ok && out?.ok) return say(`Started ${r.flow} (run ${out.runId ?? r.runId}). Any approval it needs will come here.`);
     const definite = out?.error && (res.status < 500 || out.error === "arete_inbound_webhook_secret_missing");
     if (!definite) return "unknown";
-    if (out!.error === "invalid_workflowId" || out!.error === "inbound_workflow_not_found") await say(`Not started: there is no flow "${r.flow}" that can be run from here.`);
-    else await say(`Not started: Arete answered ${res.status} (${out!.error}).`);
-    return "done";
+    if (out!.error === "invalid_workflowId" || out!.error === "inbound_workflow_not_found") return say(`Not started: there is no flow "${r.flow}" that can be run from here.`);
+    return say(`Not started: Arete answered ${res.status} (${out!.error}).`);
   }
   /** Retry every unclear `/run` (each tick, before new updates); give up loudly after RUN_RETRY_TICKS. */
   async function retryPendingRuns(): Promise<void> {
@@ -499,9 +508,11 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
         left.push(r);
         continue;
       }
-      await api
+      // given up only once the human has been told (else it stays and is told next tick)
+      const told = await api
         .sendMessage(r.chatId, `No clear answer from Arete for ${r.flow} (run ${r.runId}). Check Studio for that run before sending /run again.`, { replyTo: r.messageId })
-        .catch(() => undefined);
+        .then(() => true, () => false);
+      if (!told) left.push(r);
     }
     savePending(left);
   }
