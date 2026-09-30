@@ -56,6 +56,8 @@ export interface CreateQitemInput {
 /** What the inbound router needs: land a durable qitem, get its id (or throw). */
 export interface InboundQueuePort {
   createQitem(input: CreateQitemInput): Promise<string>;
+  /** 5.1: the deterministic inbound item already exists (a retry after it landed) — its source. */
+  existingSource?(qitemId: string): Promise<string | null>;
 }
 
 /** What the outbound driver needs: the current human-alert set, full items included. */
@@ -121,6 +123,9 @@ export function makeQueuePorts(
   opts: { loadHumanRegistry?: () => LoadResult } = {},
 ): InboundQueuePort & OutboundQueuePort {
   return {
+    async existingSource(qitemId: string): Promise<string | null> {
+      return queueRepo.getById(qitemId)?.sourceSession ?? null;
+    },
     async createQitem(input: CreateQitemInput): Promise<string> {
       const created = await queueRepo.create({
         qitemId: input.qitemId,

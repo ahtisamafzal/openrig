@@ -209,8 +209,16 @@ export class InboundRouter {
           body,
         });
       } catch (e) {
-        this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
-        return { landed: false, reason: "create_failed" };
+        // the deterministic item may already exist: this event landed before and a later step
+        // (e.g. the gate resolution) failed. Continue with it (same sender) instead of failing
+        // forever on the duplicate create.
+        const id = this.inboundQitemId(ev);
+        const existing = await this.deps.queue.existingSource?.(id).catch(() => null);
+        if (existing !== who.source) {
+          this.deps.log?.(`qitem create failed ts=${ts}: ${(e as Error).message}`);
+          return { landed: false, reason: "create_failed" };
+        }
+        qitemId = id;
       }
       let replyResolution: "resolved" | "already-resolved" | "not-applicable" | "invalid-decision" | undefined;
       if (route.correlationQitemId && this.deps.resolveHumanReply) {

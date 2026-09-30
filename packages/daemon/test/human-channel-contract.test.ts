@@ -180,6 +180,41 @@ for (const [name, make] of [["telegram", telegramChannel], ["slack", slackChanne
   });
 }
 
+describe("a failed gate resolution is retried", () => {
+  it("the reply's item already landed: the dead-letter retry resolves the gate exactly once", async () => {
+    let fail = true;
+    const flaky: typeof resolver = async (input) => {
+      if (fail) {
+        fail = false;
+        throw new Error("mission control briefly unavailable");
+      }
+      return resolver(input);
+    };
+    const map = new ThreadSeatMap(db);
+    const router = new InboundRouter({
+      queue: makeQueuePorts(repo, { loadHumanRegistry: () => registry }),
+      seen: new SeenStore(join(home, "retry-seen.jsonl")),
+      deadLetter: new DeadLetterStore<SlackEvent>(join(home, "retry-dead.jsonl")),
+      destination: "operator-agent@kernel",
+      resolveSender: (u) => {
+        const r = resolveSlackHandle(u, registry.entities);
+        return r.kind === "registered" ? { admitted: true, source: r.address } : { admitted: false, teaching: r.error };
+      },
+      resolveRoute: makeThreadRouteResolver({ map, unroutedDestination: "operator-agent@kernel" }),
+      resolveHumanReply: flaky,
+    });
+    const g = await gate();
+    map.open({ threadTs: "T-GATE", channel: "C", human: "human-founder@external", seat: "author@rig", conversationId: g.qitemId });
+    const first = await router.route({ type: "message", user: "UFOUNDER", text: "approve", ts: "9.1", thread_ts: "T-GATE", channel: "C" });
+    expect(first.disposition).toBe("dead-lettered");
+    expect(resolved(g.qitemId)).toBe(0);
+    await router.retryDeadLetters();
+    expect(resolved(g.qitemId)).toBe(1);
+    await router.retryDeadLetters();
+    expect(resolved(g.qitemId)).toBe(1);
+  });
+});
+
 describe("outbound-only channels", () => {
   it("ntfy and webhook adapters can only send (no inbound reply surface)", () => {
     for (const a of [new NtfyNotificationAdapter({ topicUrl: "https://ntfy.sh/x" }), new WebhookNotificationAdapter({ endpointUrl: "https://example.invalid/h" })]) {
