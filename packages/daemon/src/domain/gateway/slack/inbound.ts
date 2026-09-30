@@ -283,20 +283,22 @@ export class InboundRouter {
     const entries = this.deps.deadLetter.readAll();
     if (entries.length === 0) return { retried: 0, landed: 0 };
     this.deps.log?.(`retrying ${entries.length} dead-letter(s)`);
-    const stillFailing: DeadLetterEntry<SlackEvent>[] = [];
+    const results: Array<{ entry: DeadLetterEntry<SlackEvent>; outcome: "done" | "retry" }> = [];
     let landed = 0;
     const seen = this.deps.seen.load();
     for (const e of entries) {
-      if (e.ev.ts && seen.has(e.ev.ts)) continue; // already landed → recovered, drop from set
+      if (e.ev.ts && seen.has(e.ev.ts)) {
+        results.push({ entry: e, outcome: "done" }); // already landed → recovered, drop from set
+        continue;
+      }
       const r = await this.attemptLand(e.ev);
       if (r.landed) landed++;
-      else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       // reason === "dup" (in-flight) → drop; a concurrent path owns it
+      results.push({ entry: e, outcome: !r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed") ? "retry" : "done" });
     }
-    // route() may have appended new failures while this pass awaited: re-read and keep everything
-    // past the snapshot. Re-read + replace are synchronous, so no append can land in between.
-    const appended = this.deps.deadLetter.readAll().slice(entries.length);
-    this.deps.deadLetter.replaceAll([...stillFailing, ...appended]); // atomic; original intact until here
+    // merge the outcomes into the journal as it is NOW (locked across processes): entries appended
+    // meanwhile, or held by another router's pass, are kept (state-store.ts settle)
+    this.deps.deadLetter.settle(results);
     return { retried: entries.length, landed };
   }
 }

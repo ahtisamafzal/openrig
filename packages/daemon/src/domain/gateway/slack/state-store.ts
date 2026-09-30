@@ -25,6 +25,46 @@ export interface StateFsOps {
   writeFileSync(p: string, data: string): void;
   rename(from: string, to: string): void; // atomic same-dir replace
   mkdirp(dir: string): void;
+  /** Cross-process exclusive section over `p` (returns the release). Absent = single process. */
+  lock?(p: string): () => void;
+}
+
+const LOCK_WAIT_MS = 10_000;
+const LOCK_STALE_MS = 30_000;
+/**
+ * A short, synchronous cross-process lock: `<p>.lock` created exclusively. Holders only do a few
+ * synchronous file operations, so a lock older than LOCK_STALE_MS was left by a crashed process and
+ * is removed. ponytail: two waiters can both judge the same crashed lock stale in the same instant;
+ * the window needs a crash first, and the journal operations it guards are merge-safe.
+ */
+function fileLock(p: string): () => void {
+  const lockPath = `${p}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lockPath, "wx"));
+      return () => {
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          /* already gone */
+        }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        continue; // released between our open and stat
+      }
+      if (Date.now() > deadline) throw new Error(`journal lock ${lockPath} is held`);
+      Atomics.wait(nap, 0, 0, 5);
+    }
+  }
 }
 
 export const nodeStateFs: StateFsOps = {
@@ -35,6 +75,7 @@ export const nodeStateFs: StateFsOps = {
   mkdirp: (dir) => {
     fs.mkdirSync(dir, { recursive: true });
   },
+  lock: fileLock,
 };
 
 function parseLines(raw: string): unknown[] {
@@ -119,6 +160,7 @@ export interface DeadLetterEntry<T = unknown> {
  * since-landed event is skipped on re-read via the seen-set, so not even a dup).
  * There is no truncate-before-success window.
  */
+let tmpSeq = 0;
 export class DeadLetterStore<T = unknown> {
   constructor(
     private readonly file: string,
@@ -128,10 +170,40 @@ export class DeadLetterStore<T = unknown> {
 
   append(ev: T, attempts: number): void {
     this.fsops.mkdirp(path.dirname(this.file));
-    this.fsops.appendFileSync(
-      this.file,
-      JSON.stringify({ ev, at: this.now().toISOString(), attempts } satisfies DeadLetterEntry<T>) + "\n",
-    );
+    // under the journal lock: an append can never land between another process's read and replace
+    const release = this.fsops.lock?.(this.file);
+    try {
+      this.fsops.appendFileSync(
+        this.file,
+        JSON.stringify({ ev, at: this.now().toISOString(), attempts } satisfies DeadLetterEntry<T>) + "\n",
+      );
+    } finally {
+      release?.();
+    }
+  }
+
+  /**
+   * Record a retry pass's outcomes by MERGING into the journal as it is now (under the journal
+   * lock, so across processes too): an entry the pass resolved is removed, one it retried in vain
+   * gets attempts+1, and every other entry — appended meanwhile, or held by another router's pass
+   * — is kept untouched. Entries are matched by identity (`at` + event), never by position.
+   */
+  settle(results: ReadonlyArray<{ entry: DeadLetterEntry<T>; outcome: "done" | "retry" }>): void {
+    const key = (e: DeadLetterEntry<T>) => `${e.at}\u0000${JSON.stringify(e.ev)}`;
+    const outcome = new Map(results.map((r) => [key(r.entry), r.outcome]));
+    this.fsops.mkdirp(path.dirname(this.file));
+    const release = this.fsops.lock?.(this.file);
+    try {
+      const next: DeadLetterEntry<T>[] = [];
+      for (const e of this.readAll()) {
+        const o = outcome.get(key(e));
+        if (o === "done") continue;
+        next.push(o === "retry" ? { ...e, attempts: e.attempts + 1 } : e);
+      }
+      this.replaceAll(next);
+    } finally {
+      release?.();
+    }
   }
 
   /** Non-destructive read of all durable entries. */
@@ -145,11 +217,12 @@ export class DeadLetterStore<T = unknown> {
     return parseLines(raw) as DeadLetterEntry<T>[];
   }
 
-  /** Atomically replace the durable set (temp-write + rename). Used after a retry pass. */
+  /** Atomically replace the durable set (temp-write + rename). Callers outside settle() must
+   *  hold the journal exclusively (tests, single-process tools). */
   replaceAll(entries: DeadLetterEntry<T>[]): void {
     this.fsops.mkdirp(path.dirname(this.file));
     const body = entries.map((e) => JSON.stringify(e)).join("\n") + (entries.length ? "\n" : "");
-    const tmp = `${this.file}.tmp`;
+    const tmp = `${this.file}.${process.pid}.${++tmpSeq}.tmp`; // never shared with another writer
     this.fsops.writeFileSync(tmp, body);
     this.fsops.rename(tmp, this.file); // atomic: original intact until this instant
   }
