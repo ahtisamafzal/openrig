@@ -51,10 +51,51 @@ const pidAlive = (pid: number) => {
 /**
  * A short, synchronous cross-process lock: `<p>.lock` created exclusively, recording an owner
  * token + pid + host. It is never stolen from a LIVE holder (however long it pauses): only a
- * holder verified dead (same host, pid gone) — or a lock left torn/empty by a crash — is taken
- * over, by an atomic rename (one contender wins). Release unlinks only the caller's own token.
+ * holder verified dead (same host, pid gone) — or a lock left torn/empty by a crash — is removed,
+ * and only through recoverDeadLock (compare-and-remove under a recovery lock), so a contender acting
+ * on a stale observation can never remove a replacement lock another contender just acquired.
+ * Release unlinks only the caller's own token.
  * A contender that cannot get it in `waitMs` gets LockTimeout (callers fall back, never lose data).
  */
+/**
+ * Remove `lockPath` only if it still holds exactly `observed` (the bytes the caller judged dead).
+ * Serialized by `<lock>.recover` (exclusive create): while one contender validates and removes,
+ * no other can remove anything, so the check and the removal cannot be split by a replacement.
+ * ponytail: a recoverer that crashes inside this few-microsecond section leaves `.recover`, which is
+ * cleared after 5 s; a second crash in that window is the remaining ceiling.
+ */
+export function recoverDeadLock(lockPath: string, observed: string): boolean {
+  const recover = `${lockPath}.recover`;
+  try {
+    fs.closeSync(fs.openSync(recover, "wx"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    try {
+      if (Date.now() - fs.statSync(recover).mtimeMs > 5_000) fs.unlinkSync(recover);
+    } catch {
+      /* released meanwhile */
+    }
+    return false; // someone else is recovering: re-evaluate
+  }
+  try {
+    let current: string;
+    try {
+      current = fs.readFileSync(lockPath, "utf8");
+    } catch {
+      return true; // already gone
+    }
+    if (current !== observed) return false; // replaced by a live acquirer: never touch it
+    fs.unlinkSync(lockPath);
+    return true;
+  } finally {
+    try {
+      fs.unlinkSync(recover);
+    } catch {
+      /* gone */
+    }
+  }
+}
+
 function fileLock(p: string, waitMs = 10_000): () => void {
   const lockPath = `${p}.lock`;
   const token = `${process.pid}-${randomUUID()}`;
@@ -79,22 +120,19 @@ function fileLock(p: string, waitMs = 10_000): () => void {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
     let holder: { pid?: number; host?: string } | null = null;
+    let observed: string | null = null;
     let age = 0;
     try {
       age = Date.now() - fs.statSync(lockPath).mtimeMs;
-      holder = JSON.parse(fs.readFileSync(lockPath, "utf8")) as { pid?: number; host?: string };
+      observed = fs.readFileSync(lockPath, "utf8");
+      holder = JSON.parse(observed) as { pid?: number; host?: string };
     } catch {
       holder = null; // torn (a crash between create and write) or released meanwhile
     }
+    if (observed === null) continue; // released meanwhile: try again
     const dead = holder ? holder.host === os.hostname() && typeof holder.pid === "number" && !pidAlive(holder.pid) : age > 2_000;
     if (dead) {
-      try {
-        const aside = `${lockPath}.dead-${token}`;
-        fs.renameSync(lockPath, aside); // atomic: one contender removes it
-        fs.unlinkSync(aside);
-      } catch {
-        /* another contender took it over first */
-      }
+      recoverDeadLock(lockPath, observed); // removes it only if it is still exactly what we judged
       continue;
     }
     if (Date.now() > deadline) throw new LockTimeout(`journal lock ${lockPath} is held by a live process`);

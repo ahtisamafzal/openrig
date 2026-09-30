@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SeenStore, DeadLetterStore, nodeStateFs, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
+import { SeenStore, DeadLetterStore, nodeStateFs, recoverDeadLock, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
@@ -165,6 +165,24 @@ describe("DeadLetterStore — the cross-process journal lock", () => {
     d.append({ ts: "x" }, 1);
     expect(readFileSync(file, "utf8")).toContain('"x"'); // in the journal itself, not a side file
     expect(existsSync(`${file}.lock`)).toBe(false); // released
+  });
+
+  it("two contenders judged the same dead lock: the second cannot remove the first's replacement", () => {
+    const file = fresh();
+    const lock = `${file}.lock`;
+    const deadRaw = JSON.stringify({ token: "crashed", pid: spawnSync(process.execPath, ["-e", "0"]).pid, host: hostname() });
+    writeFileSync(lock, deadRaw);
+    // A and B both observed deadRaw. A recovers it and acquires a fresh lock...
+    expect(recoverDeadLock(lock, deadRaw)).toBe(true);
+    const releaseA = nodeStateFs.lock!(file);
+    const aHolds = readFileSync(lock, "utf8");
+    // ...then B acts on its stale observation: A's live lock must survive
+    expect(recoverDeadLock(lock, deadRaw)).toBe(false);
+    expect(readFileSync(lock, "utf8")).toBe(aHolds);
+    // and while A holds it, B cannot get in (A is alive)
+    expect(() => nodeStateFs.lock!(file, 50)).toThrow(/held by a live process/);
+    releaseA();
+    expect(existsSync(lock)).toBe(false);
   });
 
   it("release removes only the caller's own lock", () => {
