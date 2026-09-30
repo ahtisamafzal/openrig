@@ -139,6 +139,32 @@ describe("telegram gateway service", () => {
     }
   });
 
+  it("/run: a pending file that cannot be read (Windows lock) is never replaced", async () => {
+    const fsMod = (await import("node:fs")).default;
+    const { api } = fakeApi();
+    const file = join(home, "state", "telegram-run-pending.json");
+    fsMod.mkdirSync(join(home, "state"), { recursive: true });
+    const journal = JSON.stringify([
+      { flow: "design-check", runId: "telegram-1", body: "{}", chatId: -1001, messageId: 1, tries: 0 },
+      { flow: "design-check", runId: "telegram-2", body: "{}", chatId: -1001, messageId: 2, tries: 0 },
+    ]);
+    fsMod.writeFileSync(file, journal);
+    const fetchImpl = async () => new Response(JSON.stringify({ ok: true, runId: "telegram-1" }), { status: 202 });
+    const svc = buildTelegramService({ home, queueRepo: repo, env: { ...env, ARETE_INBOUND_WEBHOOK_SECRET: "s" }, api, fetchImpl, loadRegistry: () => registry as never });
+    const real = fsMod.readFileSync;
+    let reads = 0;
+    const spy = vi.spyOn(fsMod, "readFileSync").mockImplementation(((p: never, ...rest: never[]) => {
+      if (String(p) === file && ++reads === 2) throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+      return (real as (...a: unknown[]) => unknown)(p, ...rest);
+    }) as never);
+    try {
+      await expect(svc.retryPendingRuns!()).rejects.toThrow(/EPERM/); // the final re-read failed
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fsMod.readFileSync(file, "utf8")).toBe(journal); // untouched: nothing was lost
+  });
+
   it("/run@otherbot is not ours (handled as an ordinary message); /run@AreteBot is", async () => {
     const { api, reply } = fakeApi();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ ok: true, runId: "r" }), { status: 202 }));

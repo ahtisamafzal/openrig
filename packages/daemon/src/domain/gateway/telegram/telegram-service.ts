@@ -451,8 +451,17 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   /** A `/run` whose outcome Arete has not answered clearly yet: retried with the SAME signed body. */
   type PendingRun = { flow: string; runId: string; body: string; chatId: number; messageId: number; tries: number };
   const pendingFile = path.join(state, "telegram-run-pending.json");
+  /** Only a missing file is an empty journal: any other read or parse failure (a Windows sharing
+   *  violation, an antivirus lock) throws, so no save ever replaces pending runs it could not read. */
   const loadPending = (): PendingRun[] => {
-    try { return JSON.parse(fs.readFileSync(pendingFile, "utf8")) as PendingRun[]; } catch { return []; }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(pendingFile, "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+    return JSON.parse(raw) as PendingRun[];
   };
   /** Durable before the offset moves: the temp file is flushed to disk, then renamed into place. */
   const savePending = (runs: PendingRun[]) => {
