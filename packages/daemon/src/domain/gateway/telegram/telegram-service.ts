@@ -10,6 +10,7 @@
 // marked only after every part is sent).
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { GatewayWire } from "../gateway-subsystem.js";
 import { loadConfig } from "../slack/config.js";
@@ -92,16 +93,18 @@ function writeOffset(file: string, offset: number): void {
 const telegramHandles = (entities: readonly HumanFragment[]): Set<number> =>
   parseIds(entities.flatMap((e) => e.connectorBindings.filter((b) => b.kind === "telegram" && b.handle).map((b) => b.handle!)).join(","));
 
-/** The message parts; EVERY part ends with `ref <qitemId>`, so a reply to any part (the root
- *  included) can be correlated even when its map row was lost. */
+/** A bounded opaque correlation token for any qitem id (a caller-chosen id can be any size). */
+export const refToken = (qitemId: string) => createHash("sha256").update(qitemId).digest("hex").slice(0, 24);
+
+/** The message parts; EVERY part ends with `ref <token>`, so a reply to any part (the root
+ *  included) can be correlated even when its map row was lost. The token -> qitem mapping is
+ *  persisted BEFORE the send (see sweepOnce). */
 function renderParts(item: QueueItem): string[] {
   const lines = [item.summary ?? "(no summary)"];
   if (item.body) lines.push("", item.body);
   if (item.humanDetail) lines.push("", item.humanDetail);
   if (isGateItem(item.tags)) lines.push("", "Reply to this message with: approve / revise <direction> / reject");
-  // only a short single-line id is embedded (a caller-chosen id could be any size); without it the
-  // reply correlates through the message map alone, and every part stays within the limit
-  const ref = /^[\w.:@-]{1,128}$/.test(item.qitemId) ? `\n\nref ${item.qitemId}` : "";
+  const ref = `\n\nref ${refToken(item.qitemId)}`;
   return splitMessage(lines.join("\n"), TELEGRAM_LIMIT - ref.length).map((part) => part + ref);
 }
 
@@ -126,6 +129,22 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   const state = path.join(opts.home, "state");
   const delivered = new SeenStore(path.join(state, "telegram-delivered.jsonl"));
   const messages = new MessageMap(path.join(state, "telegram-message-map.jsonl"));
+  const refsFile = path.join(state, "telegram-refs.jsonl");
+  const putRef = (token: string, qitemId: string) => {
+    fs.mkdirSync(state, { recursive: true });
+    fs.appendFileSync(refsFile, JSON.stringify({ token, qitemId }) + "\n");
+  };
+  const qitemForToken = (token: string): string | undefined => {
+    let raw = "";
+    try { raw = fs.readFileSync(refsFile, "utf8"); } catch { return undefined; }
+    for (const line of raw.split("\n").reverse()) {
+      try {
+        const r = JSON.parse(line) as { token: string; qitemId: string };
+        if (r.token === token) return r.qitemId;
+      } catch { /* torn tail line */ }
+    }
+    return undefined;
+  };
   const offsetFile = path.join(state, "telegram-offset.json");
 
   const router = new InboundRouter({
@@ -161,7 +180,8 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   // replying human (validated below), and routes to the qitem's asking seat.
   const refFromReply = new Map<string, { qitemId: string; seat: string }>();
   const refOf = (botText: string | undefined, sender: string): { qitemId: string; seat: string } | undefined => {
-    const id = botText ? /(?:^|\n)ref (\S+)\s*$/.exec(botText)?.[1] : undefined;
+    const token = botText ? /(?:^|\n)ref ([0-9a-f]{24})\s*$/.exec(botText)?.[1] : undefined;
+    const id = token ? qitemForToken(token) : undefined;
     return id ? ownedBy(id, sender) : undefined;
   };
   /** The qitem and its asking seat when `sender` (a Telegram user id) is the human it is assigned to. */
@@ -204,6 +224,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       if (d.deferMinutes !== undefined) continue;
       try {
         let root: number | undefined;
+        putRef(refToken(item.qitemId), item.qitemId); // durable BEFORE the send
         for (const part of renderParts(item)) {
           const { messageId } = await api.sendMessage(postChat!, part, root ? { replyTo: root } : {});
           root ??= messageId;

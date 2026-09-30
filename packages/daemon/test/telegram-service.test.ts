@@ -10,7 +10,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeHumanReplyResolver } from "../src/domain/gateway/slack/slack-subsystem.js";
-import { buildTelegramService } from "../src/domain/gateway/telegram/telegram-service.js";
+import { buildTelegramService, refToken } from "../src/domain/gateway/telegram/telegram-service.js";
 import type { TelegramApi, TelegramUpdate } from "../src/domain/gateway/telegram/api.js";
 
 // Roadmap 5.1 — Telegram inside the gateway subsystem: same registry, admission and gate resolver.
@@ -109,18 +109,23 @@ describe("telegram gateway service", () => {
     expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: gate.qitemId, decision: "approve" }));
   });
 
-  it("an oversized caller-chosen qitem id is not embedded, so every part still fits", async () => {
-    const { api, sent } = fakeApi();
-    const { svc } = build(api);
+  it("an oversized caller-chosen qitem id: bounded token, every part fits, and a crash before the map write still correlates", async () => {
+    const { api, sent, reply } = fakeApi();
+    const first = build(api);
     const longId = `q-${"x".repeat(5000)}`;
     await repo.create({ ...gateRequest, qitemId: longId } as never).catch(() => undefined);
-    if (!repo.getById(longId)) return; // the repository refused the id: nothing to send
-    await svc.sweepOnce();
+    expect(repo.getById(longId)).toBeTruthy();
+    await first.svc.sweepOnce();
     expect(sent.length).toBeGreaterThan(0);
     for (const part of sent) {
       expect(part.text.length).toBeLessThanOrEqual(4096);
       expect(part.text).not.toContain(longId);
     }
+    unlinkSync(join(home, "state", "telegram-message-map.jsonl")); // the map row never landed
+    const { svc, act } = build(api);
+    reply(1, "approve", 100, 42, -1001, { text: sent[0]!.text, is_bot: true });
+    await svc.pollOnce();
+    expect(act).toHaveBeenCalledWith(expect.objectContaining({ qitemId: longId }));
   });
 
   it("in a shared chat one registered human cannot resolve another human's gate", async () => {
@@ -147,7 +152,7 @@ describe("telegram gateway service", () => {
     expect(sent.length).toBeGreaterThan(1);
     for (const part of sent) {
       expect(part.text.length).toBeLessThanOrEqual(4096);
-      expect(part.text.endsWith(`ref ${gate.qitemId}`)).toBe(true);
+      expect(part.text.endsWith(`ref ${refToken(gate.qitemId)}`)).toBe(true);
     }
     unlinkSync(join(home, "state", "telegram-message-map.jsonl"));
     const { svc, act } = build(api);
