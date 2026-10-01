@@ -83,7 +83,15 @@ describe("telegram gateway service", () => {
     reply(12, "/run design-check #abs-trans");
     await svc.pollOnce();
     expect(sent.at(-1)!.text).toContain("Usage:"); // a project and no task is not a run
+    for (const [id, text] of [[13, "/run design-check #AbsTrans"], [14, "/run design-check #abs_trans  "]] as const) {
+      reply(id, text);
+      await svc.pollOnce();
+      expect(sent.at(-1)!.text).toContain("Usage:"); // any #token is the project, never task text
+    }
     expect(calls).toHaveLength(3);
+    reply(15, "/run design-check #AbsTrans fix it");
+    await svc.pollOnce();
+    expect(JSON.parse(calls[3]!.body).inputData).toEqual({ task: "fix it", project: "AbsTrans" }); // Arete decides if it exists
   });
 
   it("/run with an unclear answer is retried with the SAME run id until Arete answers; never 'Not started'", async () => {

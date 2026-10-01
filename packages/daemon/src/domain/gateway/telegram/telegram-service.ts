@@ -546,7 +546,8 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       return;
     }
     // `#project` first names the project the run works on (Arete checks it; an unknown one never starts)
-    const tagged = /^#([a-z0-9][a-z0-9-]*)(?:\s+([\s\S]*))?$/.exec(task?.trim() ?? "");
+    // any leading #token is the project, sent as written: Arete refuses an unknown one, so it never runs unscoped
+    const tagged = /^#(\S+)(?:\s+([\s\S]*))?$/.exec(task?.trim() ?? "");
     const project = tagged?.[1];
     if (tagged) task = tagged[2] ?? "";
     if (!flow || !task?.trim()) {
