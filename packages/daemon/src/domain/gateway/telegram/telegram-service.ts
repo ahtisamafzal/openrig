@@ -30,7 +30,7 @@ export const SECRET_TELEGRAM_TOKEN = "TELEGRAM_BOT_TOKEN";
 export const SECRET_TELEGRAM_CHAT = "TELEGRAM_CHAT_ID";
 /** Shared with Arete (its ARETE_INBOUND_WEBHOOK_SECRET): signs `/run` starts to /arete/signals/inbound. */
 export const SECRET_ARETE_INBOUND = "ARETE_INBOUND_WEBHOOK_SECRET";
-/** `/run <flow> <task>`; a `@botname` suffix (groups) must name THIS bot. */
+/** `/run <flow> [#project] <task>`; a `@botname` suffix (groups) must name THIS bot. */
 const RUN_COMMAND = /^\/run(?:@(\w+))?(?:\s+([\w-]+))?(?:\s+([\s\S]*))?$/i;
 /** Ticks an unanswered `/run` is retried before the human is told to check (5 s ticks: ~5 min). */
 const RUN_RETRY_TICKS = 60;
@@ -533,7 +533,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
   }
 
   /**
-   * `/run <flow> <task>` from a registered human: start the flow through Arete's signed inbound
+   * `/run <flow> [#project] <task>` from a registered human: start the flow through Arete's signed inbound
    * endpoint and answer in the chat. The run id is the Telegram update id, so a re-polled update
    * (crash before the offset write) or an automatic retry reaches the run already started, never a
    * second one.
@@ -545,8 +545,12 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       await say("Not started: you are not a registered human.");
       return;
     }
+    // `#project` first names the project the run works on (Arete checks it; an unknown one never starts)
+    const tagged = /^#([a-z0-9][a-z0-9-]*)(?:\s+([\s\S]*))?$/.exec(task?.trim() ?? "");
+    const project = tagged?.[1];
+    if (tagged) task = tagged[2] ?? "";
     if (!flow || !task?.trim()) {
-      await say("Usage: /run <flow> <task>\ne.g. /run design-check a settings page for notifications");
+      await say("Usage: /run <flow> [#project] <task>\ne.g. /run design-check #abstrans a settings page for notifications");
       return;
     }
     if (!areteSecret) {
@@ -554,7 +558,7 @@ export function buildTelegramService(opts: TelegramServiceOpts): TelegramService
       return;
     }
     const runId = `telegram-${p.updateId}`;
-    const r: PendingRun = { flow, runId, body: JSON.stringify({ workflowId: flow, inputData: { task: task.trim() }, source: "telegram", runId }), chatId: p.chatId, messageId: p.messageId, tries: 0 };
+    const r: PendingRun = { flow, runId, body: JSON.stringify({ workflowId: flow, inputData: { task: task.trim(), ...(project ? { project } : {}) }, source: "telegram", runId }), chatId: p.chatId, messageId: p.messageId, tries: 0 };
     if ((await postRun(r)) === "done") return;
     // durable BEFORE the offset moves past this update: the retry survives a daemon restart
     savePending([...loadPending().filter((x) => x.runId !== runId), r]);

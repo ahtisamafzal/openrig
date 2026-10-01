@@ -75,8 +75,15 @@ describe("telegram gateway service", () => {
     expect(sent.at(-1)!.text).toContain('no flow "nope"');
     reply(9, "/run");
     await svc.pollOnce();
-    expect(sent.at(-1)!.text).toContain("Usage: /run <flow> <task>");
+    expect(sent.at(-1)!.text).toContain("Usage: /run <flow> [#project] <task>");
     expect(calls).toHaveLength(2);
+    reply(10, "/run design-check #abs-trans fix the login\npage");
+    await svc.pollOnce();
+    expect(JSON.parse(calls[2]!.body).inputData).toEqual({ task: "fix the login\npage", project: "abs-trans" });
+    reply(12, "/run design-check #abs-trans");
+    await svc.pollOnce();
+    expect(sent.at(-1)!.text).toContain("Usage:"); // a project and no task is not a run
+    expect(calls).toHaveLength(3);
   });
 
   it("/run with an unclear answer is retried with the SAME run id until Arete answers; never 'Not started'", async () => {
